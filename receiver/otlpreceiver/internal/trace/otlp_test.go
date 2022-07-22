@@ -23,13 +23,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 
 	"go.opentelemetry.io/collector/component/componenttest"
 	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/consumer/consumertest"
 	"go.opentelemetry.io/collector/internal/testdata"
-	"go.opentelemetry.io/collector/model/otlpgrpc"
+	"go.opentelemetry.io/collector/pdata/ptrace/ptraceotlp"
 )
 
 func TestExport(t *testing.T) {
@@ -42,13 +43,12 @@ func TestExport(t *testing.T) {
 	require.NoError(t, err, "Failed to create the TraceServiceClient: %v", err)
 	defer traceClientDoneFn()
 
-	td := testdata.GenerateTracesOneSpan()
+	td := testdata.GenerateTraces(1)
 
 	// Keep trace data to compare the test result against it
 	// Clone needed because OTLP proto XXX_ fields are altered in the GRPC downstream
 	traceData := td.Clone()
-	req := otlpgrpc.NewTracesRequest()
-	req.SetTraces(td)
+	req := ptraceotlp.NewRequestFromTraces(td)
 
 	resp, err := traceClient.Export(context.Background(), req)
 	require.NoError(t, err, "Failed to export trace: %v", err)
@@ -68,7 +68,7 @@ func TestExport_EmptyRequest(t *testing.T) {
 	require.NoError(t, err, "Failed to create the TraceServiceClient: %v", err)
 	defer traceClientDoneFn()
 
-	resp, err := traceClient.Export(context.Background(), otlpgrpc.NewTracesRequest())
+	resp, err := traceClient.Export(context.Background(), ptraceotlp.NewRequest())
 	assert.NoError(t, err, "Failed to export trace: %v", err)
 	assert.NotNil(t, resp, "The response is missing")
 }
@@ -81,21 +81,20 @@ func TestExport_ErrorConsumer(t *testing.T) {
 	require.NoError(t, err, "Failed to create the TraceServiceClient: %v", err)
 	defer traceClientDoneFn()
 
-	td := testdata.GenerateTracesOneSpan()
-	req := otlpgrpc.NewTracesRequest()
-	req.SetTraces(td)
+	td := testdata.GenerateTraces(1)
+	req := ptraceotlp.NewRequestFromTraces(td)
 	resp, err := traceClient.Export(context.Background(), req)
 	assert.EqualError(t, err, "rpc error: code = Unknown desc = my error")
-	assert.Equal(t, otlpgrpc.TracesResponse{}, resp)
+	assert.Equal(t, ptraceotlp.Response{}, resp)
 }
 
-func makeTraceServiceClient(addr net.Addr) (otlpgrpc.TracesClient, func(), error) {
-	cc, err := grpc.Dial(addr.String(), grpc.WithInsecure(), grpc.WithBlock())
+func makeTraceServiceClient(addr net.Addr) (ptraceotlp.Client, func(), error) {
+	cc, err := grpc.Dial(addr.String(), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 	if err != nil {
 		return nil, nil, err
 	}
 
-	metricsClient := otlpgrpc.NewTracesClient(cc)
+	metricsClient := ptraceotlp.NewClient(cc)
 
 	doneFn := func() { _ = cc.Close() }
 	return metricsClient, doneFn, nil
@@ -117,7 +116,7 @@ func otlpReceiverOnGRPCServer(t *testing.T, tc consumer.Traces) (net.Addr, func(
 
 	// Now run it as a gRPC server
 	srv := grpc.NewServer()
-	otlpgrpc.RegisterTracesServer(srv, r)
+	ptraceotlp.RegisterServer(srv, r)
 	go func() {
 		_ = srv.Serve(ln)
 	}()

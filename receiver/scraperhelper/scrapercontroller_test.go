@@ -31,8 +31,8 @@ import (
 	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/consumer/consumertest"
-	"go.opentelemetry.io/collector/model/pdata"
 	"go.opentelemetry.io/collector/obsreport/obsreporttest"
+	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.opentelemetry.io/collector/receiver/scrapererror"
 )
 
@@ -62,17 +62,17 @@ type testScrapeMetrics struct {
 	err               error
 }
 
-func (ts *testScrapeMetrics) scrape(_ context.Context) (pdata.Metrics, error) {
+func (ts *testScrapeMetrics) scrape(_ context.Context) (pmetric.Metrics, error) {
 	ts.timesScrapeCalled++
 	ts.ch <- ts.timesScrapeCalled
 
 	if ts.err != nil {
-		return pdata.Metrics{}, ts.err
+		return pmetric.Metrics{}, ts.err
 	}
 
-	md := pdata.NewMetrics()
-	metric := md.ResourceMetrics().AppendEmpty().InstrumentationLibraryMetrics().AppendEmpty().Metrics().AppendEmpty()
-	metric.SetDataType(pdata.MetricDataTypeGauge)
+	md := pmetric.NewMetrics()
+	metric := md.ResourceMetrics().AppendEmpty().ScopeMetrics().AppendEmpty().Metrics().AppendEmpty()
+	metric.SetDataType(pmetric.MetricDataTypeGauge)
 	metric.Gauge().DataPoints().AppendEmpty()
 	return md, nil
 }
@@ -107,7 +107,7 @@ func TestScrapeController(t *testing.T) {
 			name:            "AddMetricsScrapers_NilNextConsumerError",
 			scrapers:        2,
 			nilNextConsumer: true,
-			expectedNewErr:  "nil nextConsumer",
+			expectedNewErr:  "nil next Consumer",
 		},
 		{
 			name:                      "AddMetricsScrapersWithCollectionInterval_InvalidCollectionIntervalError",
@@ -155,7 +155,7 @@ func TestScrapeController(t *testing.T) {
 			if !test.nilNextConsumer {
 				nextConsumer = sink
 			}
-			defaultCfg := DefaultScraperControllerSettings("receiver")
+			defaultCfg := NewDefaultScraperControllerSettings("receiver")
 			cfg := &defaultCfg
 			if test.scraperControllerSettings != nil {
 				cfg = test.scraperControllerSettings
@@ -317,7 +317,8 @@ func assertScraperViews(t *testing.T, tt obsreporttest.TestTelemetry, expectedEr
 	expectedScraped := int64(sink.DataPointCount())
 	expectedErrored := int64(0)
 	if expectedErr != nil {
-		if partialError, isPartial := expectedErr.(scrapererror.PartialScrapeError); isPartial {
+		var partialError scrapererror.PartialScrapeError
+		if errors.As(expectedErr, &partialError) {
 			expectedErrored = int64(partialError.Failed)
 		} else {
 			expectedScraped = int64(0)
@@ -332,7 +333,7 @@ func TestSingleScrapePerTick(t *testing.T) {
 	scrapeMetricsCh := make(chan int, 10)
 	tsm := &testScrapeMetrics{ch: scrapeMetricsCh}
 
-	defaultCfg := DefaultScraperControllerSettings("")
+	defaultCfg := NewDefaultScraperControllerSettings("")
 	cfg := &defaultCfg
 
 	tickerCh := make(chan time.Time)

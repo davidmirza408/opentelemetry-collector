@@ -66,7 +66,7 @@ spec:
       - command:
           - "/otelcol"
           - "--config=/conf/otel-agent-config.yaml"
-        image: otel/opentelemetry-collector:0.38.0
+        image: otel/opentelemetry-collector:0.56.0
         name: otel-agent
         resources:
           limits:
@@ -177,7 +177,7 @@ spec:
       - command:
           - "/otelcol"
           - "--config=/conf/otel-collector-config.yaml"
-        image: otel/opentelemetry-collector:0.38.0
+        image: otel/opentelemetry-collector:0.56.0
         name: otel-collector
         resources:
           limits:
@@ -189,7 +189,7 @@ spec:
         ports:
         - containerPort: 55679 # Default endpoint for ZPages.
         - containerPort: 4317 # Default endpoint for OpenTelemetry receiver.
-        - containerPort: 14250 # Default endpoint for Jaeger HTTP receiver.
+        - containerPort: 14250 # Default endpoint for Jaeger gRPC receiver.
         - containerPort: 14268 # Default endpoint for Jaeger HTTP receiver.
         - containerPort: 9411 # Default endpoint for Zipkin receiver.
         - containerPort: 8888  # Default endpoint for querying metrics.

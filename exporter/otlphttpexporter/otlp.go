@@ -35,8 +35,12 @@ import (
 	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/consumer/consumererror"
 	"go.opentelemetry.io/collector/exporter/exporterhelper"
-	"go.opentelemetry.io/collector/model/otlpgrpc"
-	"go.opentelemetry.io/collector/model/pdata"
+	"go.opentelemetry.io/collector/pdata/plog"
+	"go.opentelemetry.io/collector/pdata/plog/plogotlp"
+	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.opentelemetry.io/collector/pdata/pmetric/pmetricotlp"
+	"go.opentelemetry.io/collector/pdata/ptrace"
+	"go.opentelemetry.io/collector/pdata/ptrace/ptraceotlp"
 )
 
 type exporter struct {
@@ -47,7 +51,7 @@ type exporter struct {
 	metricsURL string
 	logsURL    string
 	logger     *zap.Logger
-
+	settings   component.TelemetrySettings
 	// Default user-agent header.
 	userAgent string
 }
@@ -57,8 +61,8 @@ const (
 	maxHTTPResponseReadBytes = 64 * 1024
 )
 
-// Crete new exporter.
-func newExporter(cfg config.Exporter, logger *zap.Logger, buildInfo component.BuildInfo) (*exporter, error) {
+// Create new exporter.
+func newExporter(cfg config.Exporter, set component.ExporterCreateSettings) (*exporter, error) {
 	oCfg := cfg.(*Config)
 
 	if oCfg.Endpoint != "" {
@@ -69,20 +73,21 @@ func newExporter(cfg config.Exporter, logger *zap.Logger, buildInfo component.Bu
 	}
 
 	userAgent := fmt.Sprintf("%s/%s (%s/%s)",
-		buildInfo.Description, buildInfo.Version, runtime.GOOS, runtime.GOARCH)
+		set.BuildInfo.Description, set.BuildInfo.Version, runtime.GOOS, runtime.GOARCH)
 
 	// client construction is deferred to start
 	return &exporter{
 		config:    oCfg,
-		logger:    logger,
+		logger:    set.Logger,
 		userAgent: userAgent,
+		settings:  set.TelemetrySettings,
 	}, nil
 }
 
 // start actually creates the HTTP client. The client construction is deferred till this point as this
 // is the only place we get hold of Extensions which are required to construct auth round tripper.
 func (e *exporter) start(_ context.Context, host component.Host) error {
-	client, err := e.config.HTTPClientSettings.ToClient(host.GetExtensions())
+	client, err := e.config.HTTPClientSettings.ToClient(host.GetExtensions(), e.settings)
 	if err != nil {
 		return err
 	}
@@ -90,10 +95,9 @@ func (e *exporter) start(_ context.Context, host component.Host) error {
 	return nil
 }
 
-func (e *exporter) pushTraces(ctx context.Context, td pdata.Traces) error {
-	tr := otlpgrpc.NewTracesRequest()
-	tr.SetTraces(td)
-	request, err := tr.Marshal()
+func (e *exporter) pushTraces(ctx context.Context, td ptrace.Traces) error {
+	tr := ptraceotlp.NewRequestFromTraces(td)
+	request, err := tr.MarshalProto()
 	if err != nil {
 		return consumererror.NewPermanent(err)
 	}
@@ -101,20 +105,18 @@ func (e *exporter) pushTraces(ctx context.Context, td pdata.Traces) error {
 	return e.export(ctx, e.tracesURL, request)
 }
 
-func (e *exporter) pushMetrics(ctx context.Context, md pdata.Metrics) error {
-	tr := otlpgrpc.NewMetricsRequest()
-	tr.SetMetrics(md)
-	request, err := tr.Marshal()
+func (e *exporter) pushMetrics(ctx context.Context, md pmetric.Metrics) error {
+	tr := pmetricotlp.NewRequestFromMetrics(md)
+	request, err := tr.MarshalProto()
 	if err != nil {
 		return consumererror.NewPermanent(err)
 	}
 	return e.export(ctx, e.metricsURL, request)
 }
 
-func (e *exporter) pushLogs(ctx context.Context, ld pdata.Logs) error {
-	tr := otlpgrpc.NewLogsRequest()
-	tr.SetLogs(ld)
-	request, err := tr.Marshal()
+func (e *exporter) pushLogs(ctx context.Context, ld plog.Logs) error {
+	tr := plogotlp.NewRequestFromLogs(ld)
+	request, err := tr.MarshalProto()
 	if err != nil {
 		return consumererror.NewPermanent(err)
 	}

@@ -17,11 +17,11 @@ builds:
       - darwin
     goarch:
       - amd64
-      - arm
       - arm64
-    goarm:
-      - 6
-      - 7
+      - ppc64le
+    ignore:
+      - goos: windows
+        goarch: arm64
     binary: ocb
 release:
   github:

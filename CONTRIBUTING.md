@@ -3,6 +3,36 @@
 We'd love your help! Please join our weekly [SIG
 meeting](https://github.com/open-telemetry/community#special-interest-groups).
 
+## Target audiences
+
+The OpenTelemetry Collector has two main target audiences:
+
+1. End-users, aiming to use an OpenTelemetry Collector binary.
+1. Collector distributions, consuming the APIs exposed by the OpenTelemetry core repository. Distributions can be an
+official OpenTelemetry community project, such as the OpenTelemetry Collector "core" and "contrib", or external
+distributions, such as other open-source projects building on top of the Collector or vendor-specific distributions.
+
+### End-users
+
+End-users are the target audience for our binary distributions, as made available via the
+[opentelemetry-collector-releases](https://github.com/open-telemetry/opentelemetry-collector-releases) repository. To
+them, stability in the behavior is important, be it runtime or configuration. They are more numerous and harder to get
+in touch with, making our changes to the collector more disruptive to them than to other audiences. As a general rule,
+whenever you are developing OpenTelemetry Collector components (extensions, receivers, processors, exporters), you
+should have end-users' interests in mind. Similarly, changes to code within packages like `config` will have an impact
+on this audience. Make sure to cause minimal disruption when doing changes here.
+
+### Collector distributions
+
+In this capacity, the opentelemetry-collector repository's public Go types, functions, and interfaces act as an API for
+other projects. In addition to the end-user aspect mentioned above, this audience also cares about API compatibility,
+making them susceptible to our refactorings, even though such changes wouldn't cause any impact to end-users. See the
+"Breaking changes" in this document for more information on how to perform changes affecting this audience.
+
+This audience might use tools like the
+[opentelemetry-collector-builder](https://github.com/open-telemetry/opentelemetry-collector/tree/main/cmd/builder) as
+part of their delivery pipeline. Be mindful that changes there might cause disruption to this audience.
+
 ## How to structure PRs to get expedient reviews?
 
 We recommend that any PR (unless it is trivial) to be smaller than 500 lines
@@ -11,8 +41,15 @@ reasonably fast reviews.
 
 ### When adding a new component
 
-Consider submitting different PRs for (more details about adding new components
-[here](#adding-new-components)) :
+Components comprise of exporters, extensions, receivers, and processors. The key criteria to implementing a component is to:
+
+* Implement the `component.Component` interface
+* Provide a configuration structure which defines the configuration of the component
+* Provide the implementation which performs the component operation
+
+For more details on components, see the [Adding New Components](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/CONTRIBUTING.md#adding-new-components) document and the tutorial [Building a Trace Receiver](https://opentelemetry.io/docs/collector/trace-receiver/) which provides a detailed example of building a component.
+
+When submitting a component to the community, consider breaking it down into separate PRs as follows:
 
 * First PR should include the overall structure of the new component:
   * Readme, configuration, and factory implementation usually using the helper
@@ -150,12 +187,27 @@ $ git commit
 $ git push fork feature
 ```
 
+### Commit Messages
+
+Use descriptive commit messages. Here are [some recommendations](https://cbea.ms/git-commit/)
+on how to write good commit messages.
+When creating PRs GitHub will automatically copy commit messages into the PR description,
+so it is a useful habit to write good commit messages before the PR is created.
+Also, unless you actually want to tell a story with multiple commits make sure to squash
+into a single commit before creating the PR.
+
+When maintainers merge PRs with multiple commits, they will be squashed and GitHub will
+concatenate all commit messages right before you hit the "Confirm squash and merge"
+button. Maintainers must make sure to edit this concatenated message to make it right before merging.
+In some cases, if the commit messages are lacking the easiest approach to have at
+least something useful is copy/pasting the PR description into the commit message box
+before merging (but see above paragraph about writing good commit messages in the first place).
+
 ## General Notes
 
-This project uses Go 1.17.* and CircleCI.
+This project uses Go 1.17.* and [Github Actions.](https://github.com/features/actions)
 
-CircleCI uses the Makefile with the `ci` target, it is recommended to
-run it before submitting your PR. It runs `gofmt -s` (simplify) and `golint`.
+It is recommended to run `make gofmt all` before submitting your PR
 
 The dependencies are managed with `go mod` if you work with the sources under your
 `$GOPATH` you need to set the environment variable `GO111MODULE=on`.
@@ -170,15 +222,35 @@ for coding advice). The code must adhere to the following robustness principles 
 are important for software that runs autonomously and continuously without direct
 interaction with a human (such as this Collector).
 
+### Naming convention
+
+To keep naming patterns consistent across the project, naming patterns are enforced to make intent clear by:
+
+- Methods that return a variable that uses the zero value or values provided via the method MUST have the prefix `New`. For example:
+  - `func NewKinesisExporter(kpl aws.KinesisProducerLibrary)` allocates a variable that uses
+    the variables passed on creation.
+  - `func NewKeyValueBuilder()` SHOULD allocate internal variables to a safe zero value.
+- Methods that return a variable that uses non zero value(s) that impacts business logic MUST use the prefix `NewDefault`. For example:
+  - `func NewDefaultKinesisConfig()` would return a configuration that is the suggested default
+    and can be updated without concern of a race condition.
+- Methods that act upon an input variable MUST have a signature that reflect concisely the logic being done. For example:
+  - `func FilterAttributes(attrs []Attribute, match func(attr Attribute) bool) []Attribute` MUST only filter attributes out of the passed input
+    slice and return a new slice with values that `match` returns true. It may not do more work than what the method name implies, ie, it
+    must not key a global history of all the slices that have been filtered.
+- Variable assigned in a package's global scope that is preconfigured with a default set of values MUST use `Default` as the prefix. For example:
+  - `var DefaultMarshallers = map[string]pdata.Marshallers{...}` is defined with an exporters package that allows for converting an encoding name,
+    `zipkin`, and return the preconfigured marshaller to be used in the export process.
+
+
 ### Recommended Libraries / Defaults
 
 In order to simplify developing within the project, library recommendations have been set
 and should be followed.
 
-| Scenario | Recommended                                   | Rationale        |
-| ----------------------------------------------------------------------------|
-| Hashing  | ["hashing/fnv"](https://pkg.go.dev/hash/fnv)  | The project adopted this as the default hashing method due to the efficiency and is reasonable for non cryptographic use |
-| Testing  | Use `t.Parallel()` where possible             | Enabling more test to be run in parallel will speed up the feedback process when working on the project.                 |
+| Scenario 	 | Recommended                   	                | Rationale                                                                                                                  |
+|------------|------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------|
+| Hashing  	 | ["hashing/fnv"](https://pkg.go.dev/hash/fnv) 	 | The project adopted this as the default hashing method due to the efficiency and is reasonable for non cryptographic use 	 |
+| Testing  	 | Use `t.Parallel()` where possible            	 | Enabling more test to be run in parallel will speed up the feedback process when working on the project.                 	 |
 
 
 Within the project, there are some packages that are yet to follow the recommendations and are being address, however, any new code should adhere to the recommendations.
@@ -260,6 +332,24 @@ the event happens.
 Make log message human readable and also include data that is needed for easier
 understanding of what happened and in what context.
 
+### Executing External Processes
+
+The components should avoid executing arbitrary external processes with arbitrary command
+line arguments based on user input, including input received from the network or input
+read from the configuration file. Failure to follow this rule can result in arbitrary
+remote code execution, compelled by malicious actors that can craft the input.
+
+The following limitations are recommended:
+- If an external process needs to be executed limit and hard-code the location where
+  the executable file may be located, instead of allowing the input to dictate the
+  full path to the executable.
+- If possible limit the name of the executable file to be one from a hard-coded
+  list defined at compile time.
+- If command line arguments need to be passed to the process do not take the arguments
+  from the user input directly. Instead, compose the command line arguments indirectly,
+  if necessary, deriving the value from the user input. Limit as much as possible the
+  possible space of values for command line arguments.
+
 ### Observability
 
 Out of the box, your users should be able to observe the state of your component. 
@@ -327,6 +417,69 @@ with clear instructions on how to install the required libraries.
 Furthermore, if your package requires CGO, it MUST be able to compile and operate in a no op mode
 or report a warning back to the collector with a clear error saying CGO is required to work.
 
+### Breaking changes
+
+Whenever possible, we adhere to semver as our minimum standards. Even before v1, we strive to not break compatibility
+without a good reason. Hence, when a change is known to cause a breaking change, it MUST be clearly marked in the
+changelog, and SHOULD include a line instructing users how to move forward.
+
+We also strive to perform breaking changes in two stages, deprecating it first (`vM.N`) and breaking it in a subsequent
+version (`vM.N+1`).
+
+- when we need to remove something, we MUST mark a feature as deprecated in one version, and MAY remove it in a
+  subsequent one
+- when renaming or refactoring types, functions, or attributes, we MUST create the new name and MUST deprecate the old
+  one in one version (step 1), and MAY remove it in a subsequent version (step 2). For simple renames, the old name
+  SHALL call the new one.
+- when a feature is being replaced in favor of an existing one, we MUST mark a feature as deprecated in one version, and
+  MAY remove it in a subsequent one.
+
+Deprecation notice SHOULD contain a version starting from which the deprecation takes effect for tracking purposes. For
+example, if `GetFoo` function is going to be deprecated in `v0.45.0` version, it gets the following godoc line:
+
+```golang
+package test
+
+// Deprecated: [v0.45.0] Use MustDoFoo instead.
+func DoFoo() {}
+```
+
+When deprecating a feature affecting end-users, consider first deprecating the feature in one version, then hiding it
+behind a [feature
+flag](https://github.com/open-telemetry/opentelemetry-collector/blob/6b5a3d08a96bfb41a5e121b34f592a1d5c6e0435/service/featuregate/)
+in a subsequent version, and eventually removing it after yet another version. This is how it would look like, considering
+that each of the following steps is done in a separate version:
+
+1. Mark the feature as deprecated, add a short lived feature flag with the feature enabled by default
+1. Change the feature flag to disable the feature by default, deprecating the flag at the same time
+1. Remove the feature and the flag
+
+#### Example #1 - Renaming a function
+
+1. Current version `v0.N` has `func GetFoo() Bar`
+1. We now decided that `GetBar` is a better name. As such, on `v0.N+1` we add a new `func GetBar() Bar` function,
+   changing the existing `func GetFoo() Bar` to be an alias of the new function. Additionally, a log entry with a
+   warning is added to the old function, along with an entry to the changelog.
+1. On `v0.N+2`, we MAY remove `func GetFoo() Bar`.
+
+#### Example #2 - Changing the return values of a function
+
+1. Current version `v0.N` has `func GetFoo() Foo`
+1. We now need to also return an error. We do it by creating a new function that will be equivalent to the existing one,
+   so that current users can easily migrate to that: `func MustGetFoo() Foo`, which panics on errors. We release this in
+   `v0.N+1`, deprecating the existing `func GetFoo() Foo` with it, adding an entry to the changelog and perhaps a log
+   entry with a warning.
+1. On `v0.N+2`, we change `func GetFoo() Foo` to `func GetFoo() (Foo, error)`.
+
+#### Example #3 - Changing the arguments of a function
+
+1. Current version `v0.N` has `func GetFoo() Foo`
+1. We now decided to do something that might be blocking as part of `func GetFoo() Foo`, so, we start accepting a
+   context: `func GetFooWithContext(context.Context) Foo`. We release this in `v0.N+1`, deprecating the existing `func
+   GetFoo() Foo` with it, adding an entry to the changelog and perhaps a log entry with a warning. The existing `func
+   GetFoo() Foo` is changed to call `func GetFooWithContext(context.Background()) Foo`.
+1. On `v0.N+2`, we change `func GetFoo() Foo` to `func GetFoo(context.Context) Foo` if desired or remove it entirely if
+   needed.
 
 ## Updating Changelog
 
@@ -365,3 +518,12 @@ go: github.com/golangci/golangci-lint@v1.31.0 requires
 `go env GOPROXY` should return `https://proxy.golang.org,direct`. If it does not, set it as an environment variable:
 
 `export GOPROXY=https://proxy.golang.org,direct`
+
+## Exceptions
+
+While the rules in this and other documents in this repository is what we strive to follow, we acknowledge that rules may be 
+unfeasible to be applied in some situations. Exceptions to the rules 
+on this and other documents are acceptable if consensus can be obtained from approvers in the pull request they are proposed.
+A reason for requesting the exception MUST be given in the pull request. Until unanimity is obtained, approvers and maintainers are 
+encouraged to discuss the issue at hand. If a consensus (unanimity) cannot be obtained, the maintainers are then tasked in getting a 
+decision using its regular means (voting, TC help, ...).

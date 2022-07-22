@@ -13,19 +13,18 @@ The following configuration options can be modified:
   - `enabled` (default = true)
   - `initial_interval` (default = 5s): Time to wait after the first failure before retrying; ignored if `enabled` is `false`
   - `max_interval` (default = 30s): Is the upper bound on backoff; ignored if `enabled` is `false`
-  - `max_elapsed_time` (default = 120s): Is the maximum amount of time spent trying to send a batch; ignored if `enabled` is `false`
+  - `max_elapsed_time` (default = 300s): Is the maximum amount of time spent trying to send a batch; ignored if `enabled` is `false`
 - `sending_queue`
   - `enabled` (default = true)
   - `num_consumers` (default = 10): Number of consumers that dequeue batches; ignored if `enabled` is `false`
   - `queue_size` (default = 5000): Maximum number of batches kept in memory before dropping; ignored if `enabled` is `false`
-  User should calculate this as `num_seconds * requests_per_second` where:
+  User should calculate this as `num_seconds * requests_per_second / requests_per_batch` where:
     - `num_seconds` is the number of seconds to buffer in case of a backend outage
-    - `requests_per_second` is the average number of requests per seconds.
-- `resource_to_telemetry_conversion`
-  - `enabled` (default = false): If `enabled` is `true`, all the resource attributes will be converted to metric labels by default.
-- `timeout` (default = 5s): Time to wait per individual attempt to send data to a backend.
-
-The full list of settings exposed for this helper exporter are documented [here](factory.go).
+    - `requests_per_second` is the average number of requests per seconds
+    - `requests_per_batch` is the average number of requests per batch (if 
+      [the batch processor](https://github.com/open-telemetry/opentelemetry-collector/tree/main/processor/batchprocessor)
+      is used, the metric `batch_send_size` can be used for estimation)
+- `timeout` (default = 5s): Time to wait per individual attempt to send data to a backend
 
 ### Persistent Queue
 

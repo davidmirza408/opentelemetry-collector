@@ -60,33 +60,16 @@ func Generate(cfg Config) error {
 		return fmt.Errorf("failed to create output path: %w", err)
 	}
 
-	for _, file := range []struct {
-		outFile string
-		tmpl    *template.Template
-	}{
-		{
-			"main.go",
-			mainTemplate,
-		},
-		{
-			"main_others.go",
-			mainOthersTemplate,
-		},
-		{
-			"main_windows.go",
-			mainWindowsTemplate,
-		},
-		{
-			"components.go",
-			componentsTemplate,
-		},
-		{
-			"go.mod",
-			goModTemplate,
-		},
+	for _, tmpl := range []*template.Template{
+		mainTemplate,
+		mainOthersTemplate,
+		mainWindowsTemplate,
+		componentsTemplate,
+		componentsTestTemplate,
+		goModTemplate,
 	} {
-		if err := processAndWrite(cfg, file.tmpl, file.outFile, cfg); err != nil {
-			return fmt.Errorf("failed to generate source file with destination %q, source: %q: %w", file.outFile, file.tmpl.Name(), err)
+		if err := processAndWrite(cfg, tmpl, tmpl.Name(), cfg); err != nil {
+			return fmt.Errorf("failed to generate source file %q: %w", tmpl.Name(), err)
 		}
 	}
 
@@ -129,7 +112,7 @@ func GetModules(cfg Config) error {
 	failReason := "unknown"
 	for i := 1; i <= retries; i++ {
 		// #nosec G204
-		cmd := exec.Command(cfg.Distribution.Go, "mod", "download", "all")
+		cmd := exec.Command(cfg.Distribution.Go, "mod", "download")
 		cmd.Dir = cfg.Distribution.OutputPath
 		if out, err := cmd.CombinedOutput(); err != nil {
 			failReason = fmt.Sprintf("%s. Output: %q", err, out)
@@ -143,7 +126,7 @@ func GetModules(cfg Config) error {
 }
 
 func processAndWrite(cfg Config, tmpl *template.Template, outFile string, tmplParams interface{}) error {
-	out, err := os.Create(filepath.Join(cfg.Distribution.OutputPath, outFile))
+	out, err := os.Create(filepath.Clean(filepath.Join(cfg.Distribution.OutputPath, outFile)))
 	if err != nil {
 		return err
 	}

@@ -20,7 +20,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestParseFrom(t *testing.T) {
+func TestUnmarshalText(t *testing.T) {
 	tests := []struct {
 		str   string
 		level Level
@@ -56,63 +56,21 @@ func TestParseFrom(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.str, func(t *testing.T) {
-			lvl, err := parseLevel(test.str)
+			var lvl Level
+			err := lvl.UnmarshalText([]byte(test.str))
 			if test.err {
 				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)
+				assert.Equal(t, test.level, lvl)
 			}
-			assert.Equal(t, test.level, lvl)
 		})
 	}
 }
 
-func TestLevelSet(t *testing.T) {
-	tests := []struct {
-		str   string
-		level Level
-		err   bool
-	}{
-		{
-			str:   "",
-			level: LevelNone,
-			err:   true,
-		},
-		{
-			str:   "other_string",
-			level: LevelNone,
-			err:   true,
-		},
-		{
-			str:   levelNoneStr,
-			level: LevelNone,
-		},
-		{
-			str:   levelBasicStr,
-			level: LevelBasic,
-		},
-		{
-			str:   levelNormalStr,
-			level: LevelNormal,
-		},
-		{
-			str:   levelDetailedStr,
-			level: LevelDetailed,
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.str, func(t *testing.T) {
-			lvl := new(Level)
-			err := lvl.Set(test.str)
-			if test.err {
-				assert.Error(t, err)
-				assert.Equal(t, LevelBasic, *lvl)
-			} else {
-				assert.NoError(t, err)
-				assert.Equal(t, test.level, *lvl)
-			}
-		})
-	}
+func TestUnmarshalTextNilLevel(t *testing.T) {
+	lvl := (*Level)(nil)
+	assert.Error(t, lvl.UnmarshalText([]byte(levelNormalStr)))
 }
 
 func TestLevelString(t *testing.T) {

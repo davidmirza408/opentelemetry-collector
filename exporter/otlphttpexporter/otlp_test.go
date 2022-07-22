@@ -15,6 +15,8 @@
 package otlphttpexporter
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
@@ -43,8 +45,11 @@ import (
 	"go.opentelemetry.io/collector/exporter/exporterhelper"
 	"go.opentelemetry.io/collector/internal/testdata"
 	"go.opentelemetry.io/collector/internal/testutil"
-	"go.opentelemetry.io/collector/model/otlpgrpc"
-	"go.opentelemetry.io/collector/model/pdata"
+	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/pdata/plog"
+	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.opentelemetry.io/collector/pdata/ptrace"
+	"go.opentelemetry.io/collector/pdata/ptrace/ptraceotlp"
 	"go.opentelemetry.io/collector/receiver/otlpreceiver"
 )
 
@@ -67,17 +72,17 @@ func TestInvalidConfig(t *testing.T) {
 func TestTraceNoBackend(t *testing.T) {
 	addr := testutil.GetAvailableLocalAddress(t)
 	exp := startTracesExporter(t, "", fmt.Sprintf("http://%s/v1/traces", addr))
-	td := testdata.GenerateTracesOneSpan()
+	td := testdata.GenerateTraces(1)
 	assert.Error(t, exp.ConsumeTraces(context.Background(), td))
 }
 
 func TestTraceInvalidUrl(t *testing.T) {
 	exp := startTracesExporter(t, "http:/\\//this_is_an/*/invalid_url", "")
-	td := testdata.GenerateTracesOneSpan()
+	td := testdata.GenerateTraces(1)
 	assert.Error(t, exp.ConsumeTraces(context.Background(), td))
 
 	exp = startTracesExporter(t, "", "http:/\\//this_is_an/*/invalid_url")
-	td = testdata.GenerateTracesOneSpan()
+	td = testdata.GenerateTraces(1)
 	assert.Error(t, exp.ConsumeTraces(context.Background(), td))
 }
 
@@ -87,7 +92,7 @@ func TestTraceError(t *testing.T) {
 	startTracesReceiver(t, addr, consumertest.NewErr(errors.New("my_error")))
 	exp := startTracesExporter(t, "", fmt.Sprintf("http://%s/v1/traces", addr))
 
-	td := testdata.GenerateTracesOneSpan()
+	td := testdata.GenerateTraces(1)
 	assert.Error(t, exp.ConsumeTraces(context.Background(), td))
 }
 
@@ -122,7 +127,7 @@ func TestTraceRoundTrip(t *testing.T) {
 			startTracesReceiver(t, addr, sink)
 			exp := startTracesExporter(t, test.baseURL, test.overrideURL)
 
-			td := testdata.GenerateTracesOneSpan()
+			td := testdata.GenerateTraces(1)
 			assert.NoError(t, exp.ConsumeTraces(context.Background(), td))
 			require.Eventually(t, func() bool {
 				return sink.SpanCount() > 0
@@ -140,7 +145,7 @@ func TestMetricsError(t *testing.T) {
 	startMetricsReceiver(t, addr, consumertest.NewErr(errors.New("my_error")))
 	exp := startMetricsExporter(t, "", fmt.Sprintf("http://%s/v1/metrics", addr))
 
-	md := testdata.GenerateMetricsOneMetric()
+	md := testdata.GenerateMetrics(1)
 	assert.Error(t, exp.ConsumeMetrics(context.Background(), md))
 }
 
@@ -175,7 +180,7 @@ func TestMetricsRoundTrip(t *testing.T) {
 			startMetricsReceiver(t, addr, sink)
 			exp := startMetricsExporter(t, test.baseURL, test.overrideURL)
 
-			md := testdata.GenerateMetricsOneMetric()
+			md := testdata.GenerateMetrics(1)
 			assert.NoError(t, exp.ConsumeMetrics(context.Background(), md))
 			require.Eventually(t, func() bool {
 				return sink.DataPointCount() > 0
@@ -193,7 +198,7 @@ func TestLogsError(t *testing.T) {
 	startLogsReceiver(t, addr, consumertest.NewErr(errors.New("my_error")))
 	exp := startLogsExporter(t, "", fmt.Sprintf("http://%s/v1/logs", addr))
 
-	md := testdata.GenerateLogsOneLogRecord()
+	md := testdata.GenerateLogs(1)
 	assert.Error(t, exp.ConsumeLogs(context.Background(), md))
 }
 
@@ -228,7 +233,7 @@ func TestLogsRoundTrip(t *testing.T) {
 			startLogsReceiver(t, addr, sink)
 			exp := startLogsExporter(t, test.baseURL, test.overrideURL)
 
-			md := testdata.GenerateLogsOneLogRecord()
+			md := testdata.GenerateLogs(1)
 			assert.NoError(t, exp.ConsumeLogs(context.Background(), md))
 			require.Eventually(t, func() bool {
 				return sink.LogRecordCount() > 0
@@ -243,43 +248,47 @@ func TestLogsRoundTrip(t *testing.T) {
 func TestIssue_4221(t *testing.T) {
 	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() { assert.NoError(t, r.Body.Close()) }()
-		data, err := ioutil.ReadAll(r.Body)
+		compressedData, err := ioutil.ReadAll(r.Body)
+		require.NoError(t, err)
+		gzipReader, err := gzip.NewReader(bytes.NewReader(compressedData))
+		require.NoError(t, err)
+		data, err := ioutil.ReadAll(gzipReader)
 		require.NoError(t, err)
 		base64Data := base64.StdEncoding.EncodeToString(data)
 		// Verify same base64 encoded string is received.
 		assert.Equal(t, "CscBCkkKIAoMc2VydmljZS5uYW1lEhAKDnVvcC5zdGFnZS1ldS0xCiUKGW91dHN5c3RlbXMubW9kdWxlLnZlcnNpb24SCAoGOTAzMzg2EnoKEQoMdW9wX2NhbmFyaWVzEgExEmUKEEMDhT8Ib0+Mhs8Zi2VR34QSCOVRPDJ5XEG5IgA5QE41aASRrxZBQE41aASRrxZKEAoKc3Bhbl9pbmRleBICGANKHwoNY29kZS5mdW5jdGlvbhIOCgxteUZ1bmN0aW9uMzZ6AA==", base64Data)
 		unbase64Data, err := base64.StdEncoding.DecodeString(base64Data)
 		require.NoError(t, err)
-		tr, err := otlpgrpc.UnmarshalTracesRequest(unbase64Data)
-		require.NoError(t, err)
-		span := tr.Traces().ResourceSpans().At(0).InstrumentationLibrarySpans().At(0).Spans().At(0)
+		tr := ptraceotlp.NewRequest()
+		require.NoError(t, tr.UnmarshalProto(unbase64Data))
+		span := tr.Traces().ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
 		assert.Equal(t, "4303853f086f4f8c86cf198b6551df84", span.TraceID().HexString())
 		assert.Equal(t, "e5513c32795c41b9", span.SpanID().HexString())
 	}))
 
 	exp := startTracesExporter(t, "", svr.URL)
 
-	md := pdata.NewTraces()
+	md := ptrace.NewTraces()
 	rms := md.ResourceSpans().AppendEmpty()
 	rms.Resource().Attributes().UpsertString("service.name", "uop.stage-eu-1")
 	rms.Resource().Attributes().UpsertString("outsystems.module.version", "903386")
-	ils := rms.InstrumentationLibrarySpans().AppendEmpty()
-	ils.InstrumentationLibrary().SetName("uop_canaries")
-	ils.InstrumentationLibrary().SetVersion("1")
+	ils := rms.ScopeSpans().AppendEmpty()
+	ils.Scope().SetName("uop_canaries")
+	ils.Scope().SetVersion("1")
 	span := ils.Spans().AppendEmpty()
 
 	var traceIDBytes [16]byte
 	traceIDBytesSlice, err := hex.DecodeString("4303853f086f4f8c86cf198b6551df84")
 	require.NoError(t, err)
 	copy(traceIDBytes[:], traceIDBytesSlice)
-	span.SetTraceID(pdata.NewTraceID(traceIDBytes))
+	span.SetTraceID(pcommon.NewTraceID(traceIDBytes))
 	assert.Equal(t, "4303853f086f4f8c86cf198b6551df84", span.TraceID().HexString())
 
 	var spanIDBytes [8]byte
 	spanIDBytesSlice, err := hex.DecodeString("e5513c32795c41b9")
 	require.NoError(t, err)
 	copy(spanIDBytes[:], spanIDBytesSlice)
-	span.SetSpanID(pdata.NewSpanID(spanIDBytes))
+	span.SetSpanID(pcommon.NewSpanID(spanIDBytes))
 	assert.Equal(t, "e5513c32795c41b9", span.SpanID().HexString())
 
 	span.SetEndTimestamp(1634684637873000000)
@@ -387,14 +396,14 @@ func TestErrorResponses(t *testing.T) {
 		{
 			name:           "404",
 			responseStatus: http.StatusNotFound,
-			err:            fmt.Errorf(errMsgPrefix + "404"),
+			err:            errors.New(errMsgPrefix + "404"),
 		},
 		{
 			name:           "419",
 			responseStatus: http.StatusTooManyRequests,
 			responseBody:   status.New(codes.InvalidArgument, "Quota exceeded"),
 			err: exporterhelper.NewThrottleRetry(
-				fmt.Errorf(errMsgPrefix+"429, Message=Quota exceeded, Details=[]"),
+				errors.New(errMsgPrefix+"429, Message=Quota exceeded, Details=[]"),
 				time.Duration(0)*time.Second),
 		},
 		{
@@ -402,7 +411,7 @@ func TestErrorResponses(t *testing.T) {
 			responseStatus: http.StatusServiceUnavailable,
 			responseBody:   status.New(codes.InvalidArgument, "Server overloaded"),
 			err: exporterhelper.NewThrottleRetry(
-				fmt.Errorf(errMsgPrefix+"503, Message=Server overloaded, Details=[]"),
+				errors.New(errMsgPrefix+"503, Message=Server overloaded, Details=[]"),
 				time.Duration(0)*time.Second),
 		},
 		{
@@ -411,7 +420,7 @@ func TestErrorResponses(t *testing.T) {
 			responseBody:   status.New(codes.InvalidArgument, "Server overloaded"),
 			headers:        map[string]string{"Retry-After": "30"},
 			err: exporterhelper.NewThrottleRetry(
-				fmt.Errorf(errMsgPrefix+"503, Message=Server overloaded, Details=[]"),
+				errors.New(errMsgPrefix+"503, Message=Server overloaded, Details=[]"),
 				time.Duration(30)*time.Second),
 		},
 	}
@@ -458,7 +467,7 @@ func TestErrorResponses(t *testing.T) {
 			})
 
 			// generate traces
-			traces := pdata.NewTraces()
+			traces := ptrace.NewTraces()
 			err = exp.ConsumeTraces(context.Background(), traces)
 			assert.Error(t, err)
 
@@ -536,7 +545,7 @@ func TestUserAgent(t *testing.T) {
 				})
 
 				// generate data
-				traces := pdata.NewTraces()
+				traces := ptrace.NewTraces()
 				err = exp.ConsumeTraces(context.Background(), traces)
 				require.NoError(t, err)
 
@@ -581,7 +590,7 @@ func TestUserAgent(t *testing.T) {
 				})
 
 				// generate data
-				metrics := pdata.NewMetrics()
+				metrics := pmetric.NewMetrics()
 				err = exp.ConsumeMetrics(context.Background(), metrics)
 				require.NoError(t, err)
 
@@ -626,7 +635,7 @@ func TestUserAgent(t *testing.T) {
 				})
 
 				// generate data
-				logs := pdata.NewLogs()
+				logs := plog.NewLogs()
 				err = exp.ConsumeLogs(context.Background(), logs)
 				require.NoError(t, err)
 

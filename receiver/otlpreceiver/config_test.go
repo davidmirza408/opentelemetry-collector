@@ -15,7 +15,7 @@
 package otlpreceiver
 
 import (
-	"path"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -27,8 +27,8 @@ import (
 	"go.opentelemetry.io/collector/config/configgrpc"
 	"go.opentelemetry.io/collector/config/confighttp"
 	"go.opentelemetry.io/collector/config/confignet"
-	"go.opentelemetry.io/collector/config/configtest"
 	"go.opentelemetry.io/collector/config/configtls"
+	"go.opentelemetry.io/collector/service/servicetest"
 )
 
 func TestLoadConfig(t *testing.T) {
@@ -37,12 +37,12 @@ func TestLoadConfig(t *testing.T) {
 
 	factory := NewFactory()
 	factories.Receivers[typeStr] = factory
-	cfg, err := configtest.LoadConfigAndValidate(path.Join(".", "testdata", "config.yaml"), factories)
+	cfg, err := servicetest.LoadConfigAndValidate(filepath.Join("testdata", "config.yaml"), factories)
 
 	require.NoError(t, err)
 	require.NotNil(t, cfg)
 
-	assert.Equal(t, len(cfg.Receivers), 10)
+	assert.Equal(t, len(cfg.Receivers), 12)
 
 	assert.Equal(t, cfg.Receivers[config.NewComponentID(typeStr)], factory.CreateDefaultConfig())
 
@@ -55,6 +55,16 @@ func TestLoadConfig(t *testing.T) {
 	defaultOnlyHTTP.SetIDName("only_http")
 	defaultOnlyHTTP.GRPC = nil
 	assert.Equal(t, cfg.Receivers[config.NewComponentIDWithName(typeStr, "only_http")], defaultOnlyHTTP)
+
+	defaultOnlyHTTPNull := factory.CreateDefaultConfig().(*Config)
+	defaultOnlyHTTPNull.SetIDName("only_http_null")
+	defaultOnlyHTTPNull.GRPC = nil
+	assert.Equal(t, cfg.Receivers[config.NewComponentIDWithName(typeStr, "only_http_null")], defaultOnlyHTTPNull)
+
+	defaultOnlyHTTPEmptyMap := factory.CreateDefaultConfig().(*Config)
+	defaultOnlyHTTPEmptyMap.SetIDName("only_http_empty_map")
+	defaultOnlyHTTPEmptyMap.GRPC = nil
+	assert.Equal(t, cfg.Receivers[config.NewComponentIDWithName(typeStr, "only_http_empty_map")], defaultOnlyHTTPEmptyMap)
 
 	assert.Equal(t, cfg.Receivers[config.NewComponentIDWithName(typeStr, "customname")],
 		&Config{
@@ -203,15 +213,15 @@ func TestFailedLoadConfig(t *testing.T) {
 
 	factory := NewFactory()
 	factories.Receivers[typeStr] = factory
-	_, err = configtest.LoadConfigAndValidate(path.Join(".", "testdata", "typo_default_proto_config.yaml"), factories)
+	_, err = servicetest.LoadConfigAndValidate(filepath.Join("testdata", "typo_default_proto_config.yaml"), factories)
 	assert.EqualError(t, err, "error reading receivers configuration for \"otlp\": 1 error(s) decoding:\n\n* 'protocols' has invalid keys: htttp")
 
-	_, err = configtest.LoadConfigAndValidate(path.Join(".", "testdata", "bad_proto_config.yaml"), factories)
+	_, err = servicetest.LoadConfigAndValidate(filepath.Join("testdata", "bad_proto_config.yaml"), factories)
 	assert.EqualError(t, err, "error reading receivers configuration for \"otlp\": 1 error(s) decoding:\n\n* 'protocols' has invalid keys: thrift")
 
-	_, err = configtest.LoadConfigAndValidate(path.Join(".", "testdata", "bad_no_proto_config.yaml"), factories)
+	_, err = servicetest.LoadConfigAndValidate(filepath.Join("testdata", "bad_no_proto_config.yaml"), factories)
 	assert.EqualError(t, err, "receiver \"otlp\" has invalid configuration: must specify at least one protocol when using the OTLP receiver")
 
-	_, err = configtest.LoadConfigAndValidate(path.Join(".", "testdata", "bad_empty_config.yaml"), factories)
+	_, err = servicetest.LoadConfigAndValidate(filepath.Join("testdata", "bad_empty_config.yaml"), factories)
 	assert.EqualError(t, err, "error reading receivers configuration for \"otlp\": empty config for OTLP receiver")
 }

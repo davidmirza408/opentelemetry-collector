@@ -32,6 +32,7 @@ import (
 	spb "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
@@ -47,11 +48,11 @@ import (
 	"go.opentelemetry.io/collector/internal/internalconsumertest"
 	"go.opentelemetry.io/collector/internal/testdata"
 	"go.opentelemetry.io/collector/internal/testutil"
-	"go.opentelemetry.io/collector/model/otlp"
-	"go.opentelemetry.io/collector/model/otlpgrpc"
-	"go.opentelemetry.io/collector/model/pdata"
-	semconv "go.opentelemetry.io/collector/model/semconv/v1.5.0"
 	"go.opentelemetry.io/collector/obsreport/obsreporttest"
+	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/pdata/ptrace"
+	"go.opentelemetry.io/collector/pdata/ptrace/ptraceotlp"
+	semconv "go.opentelemetry.io/collector/semconv/v1.5.0"
 )
 
 const otlpReceiverName = "receiver_test"
@@ -68,15 +69,31 @@ var traceJSON = []byte(`
 			  }
 			]
 		  },
-		  "instrumentation_library_spans": [
+		  "scope_spans": [
 			{
 			  "spans": [
+				{
+				  "trace_id": "5B8EFFF798038103D269B633813FC60C",
+				  "span_id": "EEE19B7EC3C1B174",
+				  "parent_span_id": "EEE19B7EC3C1B173",
+				  "name": "testSpan",
+				  "start_time_unix_nano": 1544712660300000000,
+				  "end_time_unix_nano": 1544712660600000000,
+				  "kind": 2,
+				  "attributes": [
+					{
+					  "key": "attr1",
+					  "value": { "intValue": 55 }
+					}
+				  ]
+				},
 				{
 				  "trace_id": "5B8EFFF798038103D269B633813FC60C",
 				  "span_id": "EEE19B7EC3C1B173",
 				  "name": "testSpan",
 				  "start_time_unix_nano": 1544712660000000000,
 				  "end_time_unix_nano": 1544712661000000000,
+				  "kind": "SPAN_KIND_CLIENT",
 				  "attributes": [
 					{
 					  "key": "attr1",
@@ -91,17 +108,28 @@ var traceJSON = []byte(`
 	  ]
 	}`)
 
-var traceOtlp = func() pdata.Traces {
-	td := pdata.NewTraces()
+var traceOtlp = func() ptrace.Traces {
+	td := ptrace.NewTraces()
 	rs := td.ResourceSpans().AppendEmpty()
 	rs.Resource().Attributes().UpsertString(semconv.AttributeHostName, "testHost")
-	span := rs.InstrumentationLibrarySpans().AppendEmpty().Spans().AppendEmpty()
-	span.SetTraceID(pdata.NewTraceID([16]byte{0x5B, 0x8E, 0xFF, 0xF7, 0x98, 0x3, 0x81, 0x3, 0xD2, 0x69, 0xB6, 0x33, 0x81, 0x3F, 0xC6, 0xC}))
-	span.SetSpanID(pdata.NewSpanID([8]byte{0xEE, 0xE1, 0x9B, 0x7E, 0xC3, 0xC1, 0xB1, 0x73}))
-	span.SetName("testSpan")
-	span.SetStartTimestamp(1544712660000000000)
-	span.SetEndTimestamp(1544712661000000000)
-	span.Attributes().UpsertInt("attr1", 55)
+	spans := rs.ScopeSpans().AppendEmpty().Spans()
+	span1 := spans.AppendEmpty()
+	span1.SetTraceID(pcommon.NewTraceID([16]byte{0x5B, 0x8E, 0xFF, 0xF7, 0x98, 0x3, 0x81, 0x3, 0xD2, 0x69, 0xB6, 0x33, 0x81, 0x3F, 0xC6, 0xC}))
+	span1.SetSpanID(pcommon.NewSpanID([8]byte{0xEE, 0xE1, 0x9B, 0x7E, 0xC3, 0xC1, 0xB1, 0x74}))
+	span1.SetParentSpanID(pcommon.NewSpanID([8]byte{0xEE, 0xE1, 0x9B, 0x7E, 0xC3, 0xC1, 0xB1, 0x73}))
+	span1.SetName("testSpan")
+	span1.SetStartTimestamp(1544712660300000000)
+	span1.SetEndTimestamp(1544712660600000000)
+	span1.SetKind(ptrace.SpanKindServer)
+	span1.Attributes().UpsertInt("attr1", 55)
+	span2 := spans.AppendEmpty()
+	span2.SetTraceID(pcommon.NewTraceID([16]byte{0x5B, 0x8E, 0xFF, 0xF7, 0x98, 0x3, 0x81, 0x3, 0xD2, 0x69, 0xB6, 0x33, 0x81, 0x3F, 0xC6, 0xC}))
+	span2.SetSpanID(pcommon.NewSpanID([8]byte{0xEE, 0xE1, 0x9B, 0x7E, 0xC3, 0xC1, 0xB1, 0x73}))
+	span2.SetName("testSpan")
+	span2.SetStartTimestamp(1544712660000000000)
+	span2.SetEndTimestamp(1544712661000000000)
+	span2.SetKind(ptrace.SpanKindClient)
+	span2.Attributes().UpsertInt("attr1", 55)
 	return td
 }()
 
@@ -143,21 +171,166 @@ func TestJsonHttp(t *testing.T) {
 	// Wait for the servers to start
 	<-time.After(10 * time.Millisecond)
 
-	// Previously we used /v1/trace as the path. The correct path according to OTLP spec
-	// is /v1/traces. We currently support both on the receiving side to give graceful
-	// period for senders to roll out a fix, so we test for both paths to make sure
-	// the receiver works correctly.
-	targetURLPaths := []string{"/v1/trace", "/v1/traces"}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			url := fmt.Sprintf("http://%s/v1/traces", addr)
+			sink.Reset()
+			testHTTPJSONRequest(t, url, sink, test.encoding, test.err)
+		})
+	}
+}
+
+func TestHandleInvalidRequests(t *testing.T) {
+	endpoint := testutil.GetAvailableLocalAddress(t)
+	cfg := &Config{
+		ReceiverSettings: config.NewReceiverSettings(config.NewComponentID(typeStr)),
+		Protocols:        Protocols{HTTP: &confighttp.HTTPServerSettings{Endpoint: endpoint}},
+	}
+
+	// Traces
+	tr, err := NewFactory().CreateTracesReceiver(
+		context.Background(),
+		componenttest.NewNopReceiverCreateSettings(),
+		cfg,
+		consumertest.NewNop())
+	require.NoError(t, err)
+	assert.NotNil(t, tr)
+	require.NoError(t, tr.Start(context.Background(), componenttest.NewNopHost()))
+
+	// Metrics
+	mr, err := NewFactory().CreateMetricsReceiver(
+		context.Background(),
+		componenttest.NewNopReceiverCreateSettings(),
+		cfg,
+		consumertest.NewNop())
+	require.NoError(t, err)
+	assert.NotNil(t, tr)
+	require.NoError(t, mr.Start(context.Background(), componenttest.NewNopHost()))
+
+	// Logs
+	lr, err := NewFactory().CreateLogsReceiver(
+		context.Background(),
+		componenttest.NewNopReceiverCreateSettings(),
+		cfg,
+		consumertest.NewNop())
+	require.NoError(t, err)
+	assert.NotNil(t, tr)
+	require.NoError(t, lr.Start(context.Background(), componenttest.NewNopHost()))
+
+	tests := []struct {
+		name        string
+		uri         string
+		method      string
+		contentType string
+
+		expectedStatus       int
+		expectedResponseBody string
+	}{
+		{
+			name:        "POST /v1/traces, no content type",
+			uri:         "/v1/traces",
+			method:      http.MethodPost,
+			contentType: "",
+
+			expectedStatus:       http.StatusUnsupportedMediaType,
+			expectedResponseBody: "415 unsupported media type, supported: [application/json, application/x-protobuf]",
+		},
+		{
+			name:        "PATCH /v1/traces",
+			uri:         "/v1/traces",
+			method:      http.MethodPatch,
+			contentType: "application/json",
+
+			expectedStatus:       http.StatusMethodNotAllowed,
+			expectedResponseBody: "405 method not allowed, supported: [POST]",
+		},
+		{
+			name:        "GET /v1/traces",
+			uri:         "/v1/traces",
+			method:      http.MethodGet,
+			contentType: "application/json",
+
+			expectedStatus:       http.StatusMethodNotAllowed,
+			expectedResponseBody: "405 method not allowed, supported: [POST]",
+		},
+		{
+			name:        "POST /v1/metrics, no content type",
+			uri:         "/v1/metrics",
+			method:      http.MethodPost,
+			contentType: "",
+
+			expectedStatus:       http.StatusUnsupportedMediaType,
+			expectedResponseBody: "415 unsupported media type, supported: [application/json, application/x-protobuf]",
+		},
+		{
+			name:        "PATCH /v1/metrics",
+			uri:         "/v1/metrics",
+			method:      http.MethodPatch,
+			contentType: "application/json",
+
+			expectedStatus:       http.StatusMethodNotAllowed,
+			expectedResponseBody: "405 method not allowed, supported: [POST]",
+		},
+		{
+			name:        "GET /v1/metrics",
+			uri:         "/v1/metrics",
+			method:      http.MethodGet,
+			contentType: "application/json",
+
+			expectedStatus:       http.StatusMethodNotAllowed,
+			expectedResponseBody: "405 method not allowed, supported: [POST]",
+		},
+		{
+			name:        "POST /v1/logs, no content type",
+			uri:         "/v1/logs",
+			method:      http.MethodPost,
+			contentType: "",
+
+			expectedStatus:       http.StatusUnsupportedMediaType,
+			expectedResponseBody: "415 unsupported media type, supported: [application/json, application/x-protobuf]",
+		},
+		{
+			name:        "PATCH /v1/logs",
+			uri:         "/v1/logs",
+			method:      http.MethodPatch,
+			contentType: "application/json",
+
+			expectedStatus:       http.StatusMethodNotAllowed,
+			expectedResponseBody: "405 method not allowed, supported: [POST]",
+		},
+		{
+			name:        "GET /v1/logs",
+			uri:         "/v1/logs",
+			method:      http.MethodGet,
+			contentType: "application/json",
+
+			expectedStatus:       http.StatusMethodNotAllowed,
+			expectedResponseBody: "405 method not allowed, supported: [POST]",
+		},
+	}
 
 	for _, test := range tests {
-		for _, targetURLPath := range targetURLPaths {
-			t.Run(test.name+targetURLPath, func(t *testing.T) {
-				url := fmt.Sprintf("http://%s%s", addr, targetURLPath)
-				sink.Reset()
-				testHTTPJSONRequest(t, url, sink, test.encoding, test.err)
-			})
-		}
+		t.Run(test.name, func(t *testing.T) {
+			url := fmt.Sprintf("http://%s%s", endpoint, test.uri)
+			req, err2 := http.NewRequest(test.method, url, bytes.NewReader([]byte(`{}`)))
+			require.NoError(t, err2)
+			req.Header.Set("Content-Type", test.contentType)
+
+			client := &http.Client{}
+			resp, err2 := client.Do(req)
+			require.NoError(t, err2)
+
+			body, err2 := ioutil.ReadAll(resp.Body)
+			require.NoError(t, err2)
+
+			require.Equal(t, resp.Header.Get("Content-Type"), "text/plain")
+			require.Equal(t, resp.StatusCode, test.expectedStatus)
+			require.EqualValues(t, body, test.expectedResponseBody)
+		})
 	}
+
+	err = tr.Shutdown(context.Background())
+	require.NoError(t, err)
 }
 
 func testHTTPJSONRequest(t *testing.T, url string, sink *internalconsumertest.ErrOrSinkConsumer, encoding string, expectedErr error) {
@@ -192,8 +365,8 @@ func testHTTPJSONRequest(t *testing.T, url string, sink *internalconsumertest.Er
 	allTraces := sink.AllTraces()
 	if expectedErr == nil {
 		assert.Equal(t, 200, resp.StatusCode)
-		_, err = otlpgrpc.UnmarshalJSONTracesResponse(respBytes)
-		assert.NoError(t, err, "Unable to unmarshal response to TracesResponse")
+		tr := ptraceotlp.NewResponse()
+		assert.NoError(t, tr.UnmarshalJSON(respBytes), "Unable to unmarshal response to Response")
 
 		require.Len(t, allTraces, 1)
 		assert.EqualValues(t, allTraces[0], traceOtlp)
@@ -249,26 +422,18 @@ func TestProtoHttp(t *testing.T) {
 	// Wait for the servers to start
 	<-time.After(10 * time.Millisecond)
 
-	td := testdata.GenerateTracesOneSpan()
-	traceBytes, err := otlp.NewProtobufTracesMarshaler().MarshalTraces(td)
+	td := testdata.GenerateTraces(1)
+	traceBytes, err := ptrace.NewProtoMarshaler().MarshalTraces(td)
 	if err != nil {
 		t.Errorf("Error marshaling protobuf: %v", err)
 	}
 
-	// Previously we used /v1/trace as the path. The correct path according to OTLP spec
-	// is /v1/traces. We currently support both on the receiving side to give graceful
-	// period for senders to roll out a fix, so we test for both paths to make sure
-	// the receiver works correctly.
-	targetURLPaths := []string{"/v1/trace", "/v1/traces"}
-
 	for _, test := range tests {
-		for _, targetURLPath := range targetURLPaths {
-			t.Run(test.name+targetURLPath, func(t *testing.T) {
-				url := fmt.Sprintf("http://%s%s", addr, targetURLPath)
-				tSink.Reset()
-				testHTTPProtobufRequest(t, url, tSink, test.encoding, traceBytes, test.err, td)
-			})
-		}
+		t.Run(test.name, func(t *testing.T) {
+			url := fmt.Sprintf("http://%s/v1/traces", addr)
+			tSink.Reset()
+			testHTTPProtobufRequest(t, url, tSink, test.encoding, traceBytes, test.err, td)
+		})
 	}
 }
 
@@ -301,7 +466,7 @@ func testHTTPProtobufRequest(
 	encoding string,
 	traceBytes []byte,
 	expectedErr error,
-	wantData pdata.Traces,
+	wantData ptrace.Traces,
 ) {
 	tSink.SetConsumeError(expectedErr)
 
@@ -321,8 +486,9 @@ func testHTTPProtobufRequest(
 
 	if expectedErr == nil {
 		require.Equal(t, 200, resp.StatusCode, "Unexpected return status")
-		_, err = otlpgrpc.UnmarshalTracesResponse(respBytes)
-		require.NoError(t, err, "Unable to unmarshal response to TracesResponse")
+
+		tr := ptraceotlp.NewResponse()
+		assert.NoError(t, tr.UnmarshalProto(respBytes), "Unable to unmarshal response to Response")
 
 		require.Len(t, allTraces, 1)
 		assert.EqualValues(t, allTraces[0], wantData)
@@ -479,13 +645,13 @@ func TestOTLPReceiverTrace_HandleNextConsumerResponse(t *testing.T) {
 	}
 
 	addr := testutil.GetAvailableLocalAddress(t)
-	req := testdata.GenerateTracesOneSpan()
+	req := testdata.GenerateTraces(1)
 
 	exporters := []struct {
 		receiverTag string
 		exportFn    func(
 			cc *grpc.ClientConn,
-			td pdata.Traces) error
+			td ptrace.Traces) error
 	}{
 		{
 			receiverTag: "trace",
@@ -506,7 +672,7 @@ func TestOTLPReceiverTrace_HandleNextConsumerResponse(t *testing.T) {
 				require.NoError(t, ocr.Start(context.Background(), componenttest.NewNopHost()))
 				t.Cleanup(func() { require.NoError(t, ocr.Shutdown(context.Background())) })
 
-				cc, err := grpc.Dial(addr, grpc.WithInsecure(), grpc.WithBlock())
+				cc, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 				require.NoError(t, err)
 				defer cc.Close()
 
@@ -576,10 +742,10 @@ func TestGRPCMaxRecvSize(t *testing.T) {
 	require.NotNil(t, ocr)
 	require.NoError(t, ocr.Start(context.Background(), componenttest.NewNopHost()))
 
-	cc, err := grpc.Dial(addr, grpc.WithInsecure(), grpc.WithBlock())
+	cc, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 	require.NoError(t, err)
 
-	td := testdata.GenerateTracesManySpansSameResource(50000)
+	td := testdata.GenerateTraces(50000)
 	require.Error(t, exportTraces(cc, td))
 	cc.Close()
 	require.NoError(t, ocr.Shutdown(context.Background()))
@@ -591,11 +757,11 @@ func TestGRPCMaxRecvSize(t *testing.T) {
 	require.NoError(t, ocr.Start(context.Background(), componenttest.NewNopHost()))
 	t.Cleanup(func() { require.NoError(t, ocr.Shutdown(context.Background())) })
 
-	cc, err = grpc.Dial(addr, grpc.WithInsecure(), grpc.WithBlock())
+	cc, err = grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 	require.NoError(t, err)
 	defer cc.Close()
 
-	td = testdata.GenerateTracesManySpansSameResource(50000)
+	td = testdata.GenerateTraces(50000)
 	require.NoError(t, exportTraces(cc, td))
 	require.Len(t, sink.AllTraces(), 1)
 	assert.Equal(t, td, sink.AllTraces()[0])
@@ -626,6 +792,50 @@ func TestHTTPInvalidTLSCredentials(t *testing.T) {
 	assert.NotNil(t, r)
 	assert.EqualError(t, r.Start(context.Background(), componenttest.NewNopHost()),
 		`failed to load TLS config: for auth via TLS, either both certificate and key must be supplied, or neither`)
+}
+
+func testHTTPMaxRequestBodySizeJSON(t *testing.T, payload []byte, size int, expectedStatusCode int) {
+	endpoint := testutil.GetAvailableLocalAddress(t)
+	url := fmt.Sprintf("http://%s/v1/traces", endpoint)
+	cfg := &Config{
+		ReceiverSettings: config.NewReceiverSettings(config.NewComponentID(typeStr)),
+		Protocols: Protocols{
+			HTTP: &confighttp.HTTPServerSettings{
+				Endpoint:           endpoint,
+				MaxRequestBodySize: int64(size),
+			},
+		},
+	}
+
+	r, err := NewFactory().CreateTracesReceiver(
+		context.Background(),
+		componenttest.NewNopReceiverCreateSettings(),
+		cfg,
+		consumertest.NewNop())
+	require.NoError(t, err)
+	assert.NotNil(t, r)
+	require.NoError(t, r.Start(context.Background(), componenttest.NewNopHost()))
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(payload))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	_, err = ioutil.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, expectedStatusCode, resp.StatusCode)
+
+	err = r.Shutdown(context.Background())
+	require.NoError(t, err)
+}
+
+func TestHTTPMaxRequestBodySize_OK(t *testing.T) {
+	testHTTPMaxRequestBodySizeJSON(t, traceJSON, len(traceJSON), 200)
+}
+
+func TestHTTPMaxRequestBodySize_TooLarge(t *testing.T) {
+	testHTTPMaxRequestBodySizeJSON(t, traceJSON, len(traceJSON)-1, 400)
 }
 
 func newGRPCReceiver(t *testing.T, name string, endpoint string, tc consumer.Traces, mc consumer.Metrics) component.Component {
@@ -675,7 +885,7 @@ func compressGzip(body []byte) (*bytes.Buffer, error) {
 	return &buf, nil
 }
 
-type senderFunc func(td pdata.Traces)
+type senderFunc func(td ptrace.Traces)
 
 func TestShutdown(t *testing.T) {
 	endpointGrpc := testutil.GetAvailableLocalAddress(t)
@@ -698,20 +908,20 @@ func TestShutdown(t *testing.T) {
 	require.NotNil(t, r)
 	require.NoError(t, r.Start(context.Background(), componenttest.NewNopHost()))
 
-	conn, err := grpc.Dial(endpointGrpc, grpc.WithInsecure(), grpc.WithBlock())
+	conn, err := grpc.Dial(endpointGrpc, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 	require.NoError(t, err)
 	defer conn.Close()
 
 	doneSignalGrpc := make(chan bool)
 	doneSignalHTTP := make(chan bool)
 
-	senderGrpc := func(td pdata.Traces) {
+	senderGrpc := func(td ptrace.Traces) {
 		// Ignore error, may be executed after the receiver shutdown.
 		_ = exportTraces(conn, td)
 	}
-	senderHTTP := func(td pdata.Traces) {
+	senderHTTP := func(td ptrace.Traces) {
 		// Send request via OTLP/HTTP.
-		traceBytes, err2 := otlp.NewProtobufTracesMarshaler().MarshalTraces(td)
+		traceBytes, err2 := ptrace.NewProtoMarshaler().MarshalTraces(td)
 		if err2 != nil {
 			t.Errorf("Error marshaling protobuf: %v", err2)
 		}
@@ -768,21 +978,20 @@ loop:
 			break loop
 		default:
 		}
-		senderFn(testdata.GenerateTracesOneSpan())
+		senderFn(testdata.GenerateTraces(1))
 	}
 
 	// After getting the signal to stop, send one more span and then
 	// finally stop. We should never receive this last span.
-	senderFn(testdata.GenerateTracesOneSpan())
+	senderFn(testdata.GenerateTraces(1))
 
 	// Indicate that we are done.
 	close(doneSignal)
 }
 
-func exportTraces(cc *grpc.ClientConn, td pdata.Traces) error {
-	acc := otlpgrpc.NewTracesClient(cc)
-	req := otlpgrpc.NewTracesRequest()
-	req.SetTraces(td)
+func exportTraces(cc *grpc.ClientConn, td ptrace.Traces) error {
+	acc := ptraceotlp.NewClient(cc)
+	req := ptraceotlp.NewRequestFromTraces(td)
 	_, err := acc.Export(context.Background(), req)
 
 	return err

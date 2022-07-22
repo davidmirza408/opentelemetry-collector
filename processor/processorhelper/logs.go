@@ -21,20 +21,18 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/component/componenterror"
-	"go.opentelemetry.io/collector/component/componenthelper"
 	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/consumer"
-	"go.opentelemetry.io/collector/consumer/consumerhelper"
-	"go.opentelemetry.io/collector/model/pdata"
+	"go.opentelemetry.io/collector/pdata/plog"
 )
 
 // ProcessLogsFunc is a helper function that processes the incoming data and returns the data to be sent to the next component.
 // If error is returned then returned data are ignored. It MUST not call the next component.
-type ProcessLogsFunc func(context.Context, pdata.Logs) (pdata.Logs, error)
+type ProcessLogsFunc func(context.Context, plog.Logs) (plog.Logs, error)
 
 type logProcessor struct {
-	component.Component
+	component.StartFunc
+	component.ShutdownFunc
 	consumer.Logs
 }
 
@@ -51,12 +49,12 @@ func NewLogsProcessor(
 	}
 
 	if nextConsumer == nil {
-		return nil, componenterror.ErrNilNextConsumer
+		return nil, component.ErrNilNextConsumer
 	}
 
 	eventOptions := spanAttributes(cfg.ID())
 	bs := fromOptions(options)
-	logsConsumer, err := consumerhelper.NewLogs(func(ctx context.Context, ld pdata.Logs) error {
+	logsConsumer, err := consumer.NewLogs(func(ctx context.Context, ld plog.Logs) error {
 		span := trace.SpanFromContext(ctx)
 		span.AddEvent("Start processing.", eventOptions)
 		var err error
@@ -75,7 +73,8 @@ func NewLogsProcessor(
 	}
 
 	return &logProcessor{
-		Component: componenthelper.New(bs.componentOptions...),
-		Logs:      logsConsumer,
+		StartFunc:    bs.StartFunc,
+		ShutdownFunc: bs.ShutdownFunc,
+		Logs:         logsConsumer,
 	}, nil
 }

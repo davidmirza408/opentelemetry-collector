@@ -25,18 +25,15 @@ import (
 	"go.uber.org/zap"
 )
 
-const defaultOtelColVersion = "0.41.0"
+const defaultOtelColVersion = "0.56.0"
 
 // ErrInvalidGoMod indicates an invalid gomod
 var ErrInvalidGoMod = errors.New("invalid gomod specification for module")
 
-// ErrDeprecatedCore indicates deprecated core
-var ErrDeprecatedCore = errors.New("mod.Core has deprecated, you should not be used anymore and required to be set mod.GoMod instead")
-
 // Config holds the builder's configuration
 type Config struct {
 	Logger          *zap.Logger
-	SkipCompilation bool
+	SkipCompilation bool `mapstructure:"-"`
 
 	Distribution Distribution `mapstructure:"dist"`
 	Exporters    []Module     `mapstructure:"exporters"`
@@ -54,10 +51,8 @@ type Distribution struct {
 	Go             string `mapstructure:"go"`
 	Description    string `mapstructure:"description"`
 	OtelColVersion string `mapstructure:"otelcol_version"`
-	// IncludeCore is deprecated and note that if this is being used, it will be removed in a subsequent release
-	IncludeCore bool   `mapstructure:"include_core"`
-	OutputPath  string `mapstructure:"output_path"`
-	Version     string `mapstructure:"version"`
+	OutputPath     string `mapstructure:"output_path"`
+	Version        string `mapstructure:"version"`
 }
 
 // Module represents a receiver, exporter, processor or extension for the distribution
@@ -66,11 +61,10 @@ type Module struct {
 	Import string `mapstructure:"import"` // if not specified, this is the path part of the go mods
 	GoMod  string `mapstructure:"gomod"`  // a gomod-compatible spec for the module
 	Path   string `mapstructure:"path"`   // an optional path to the local version of this module
-	Core   *bool  `mapstructure:"core"`   // whether this module comes from core. For this property isn't referred from anywhere, it might be removed. please see #15.
 }
 
-// DefaultConfig creates a new config, with default values
-func DefaultConfig() Config {
+// NewDefaultConfig creates a new config, with default values
+func NewDefaultConfig() Config {
 	log, err := zap.NewDevelopment()
 	if err != nil {
 		panic(fmt.Sprintf("failed to obtain a logger instance: %v", err))
@@ -100,13 +94,6 @@ func (c *Config) Validate() error {
 			return ErrGoNotFound
 		}
 		c.Distribution.Go = path
-	}
-
-	// create a warning message that include_core is deprecated and will be removed in a subsequent release
-	if c.Distribution.IncludeCore {
-		c.Logger.Warn("IncludeCore is deprecated. Starting from v0.41.0, you need to include all components explicitly.")
-	} else {
-		c.Logger.Info("IncludeCore is deprecated, starting from v0.41.0. The new behavior won't affect your distribution, just remove the option from the manifest.")
 	}
 
 	c.Logger.Info("Using go", zap.String("go-executable", c.Distribution.Go))
@@ -144,9 +131,6 @@ func (c *Config) ParseModules() error {
 func parseModules(mods []Module) ([]Module, error) {
 	var parsedModules []Module
 	for _, mod := range mods {
-		if mod.Core != nil {
-			return mods, ErrDeprecatedCore
-		}
 		if mod.GoMod == "" {
 			return mods, fmt.Errorf("%w, module: %q", ErrInvalidGoMod, mod.GoMod)
 		}
@@ -163,7 +147,7 @@ func parseModules(mods []Module) ([]Module, error) {
 		if strings.HasPrefix(mod.Path, "./") {
 			path, err := os.Getwd()
 			if err != nil {
-				return mods, fmt.Errorf("module has a relative Path element, but we couldn't get the current working dir: %v", err)
+				return mods, fmt.Errorf("module has a relative Path element, but we couldn't get the current working dir: %w", err)
 			}
 
 			mod.Path = fmt.Sprintf("%s/%s", path, mod.Path[2:])

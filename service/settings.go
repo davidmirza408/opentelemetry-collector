@@ -15,17 +15,13 @@
 package service // import "go.opentelemetry.io/collector/service"
 
 import (
-	"go.opentelemetry.io/contrib/zpages"
 	"go.uber.org/zap"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
-	"go.opentelemetry.io/collector/config/configmapprovider"
-	"go.opentelemetry.io/collector/config/configunmarshaler"
 )
 
-// svcSettings holds configuration for building a new service.
-type svcSettings struct {
+// settings holds configuration for building a new service.
+type settings struct {
 	// Factories component factories.
 	Factories component.Factories
 
@@ -33,16 +29,16 @@ type svcSettings struct {
 	BuildInfo component.BuildInfo
 
 	// Config represents the configuration of the service.
-	Config *config.Config
-
-	// Telemetry represents the service configured telemetry for all the components.
-	Telemetry component.TelemetrySettings
-
-	// ZPagesSpanProcessor represents the SpanProcessor for tracez page.
-	ZPagesSpanProcessor *zpages.SpanProcessor
+	Config *Config
 
 	// AsyncErrorChannel is the channel that is used to report fatal errors.
 	AsyncErrorChannel chan error
+
+	// LoggingOptions provides a way to change behavior of zap logging.
+	LoggingOptions []zap.Option
+
+	// For testing purpose only.
+	telemetry *telemetryInitializer
 }
 
 // CollectorSettings holds configuration for creating a new Collector.
@@ -59,17 +55,16 @@ type CollectorSettings struct {
 	// and manually handle the signals to shutdown the collector.
 	DisableGracefulShutdown bool
 
-	// ConfigMapProvider provides the configuration's config.Map.
-	// If it is not provided a default provider is used. The default provider loads the configuration
-	// from a config file define by the --config command line flag and overrides component's configuration
-	// properties supplied via --set command line flag.
-	// If the provider is configmapprovider.WatchableRetrieved, collector may reload the configuration upon error.
-	ConfigMapProvider configmapprovider.Provider
-
-	// ConfigUnmarshaler unmarshalls the configuration's Parser into the service configuration.
-	// If it is not provided a default unmarshaler is used.
-	ConfigUnmarshaler configunmarshaler.ConfigUnmarshaler
+	// ConfigProvider provides the service configuration.
+	// If the provider watches for configuration change, collector may reload the new configuration upon changes.
+	ConfigProvider ConfigProvider
 
 	// LoggingOptions provides a way to change behavior of zap logging.
 	LoggingOptions []zap.Option
+
+	// SkipSettingGRPCLogger avoids setting the grpc logger
+	SkipSettingGRPCLogger bool
+
+	// For testing purpose only.
+	telemetry *telemetryInitializer
 }

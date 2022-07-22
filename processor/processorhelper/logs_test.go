@@ -23,15 +23,14 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/component/componenterror"
 	"go.opentelemetry.io/collector/component/componenttest"
 	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/consumer/consumertest"
-	"go.opentelemetry.io/collector/model/pdata"
+	"go.opentelemetry.io/collector/pdata/plog"
 )
 
-var testLogsCfg = config.NewProcessorSettings(config.NewComponentID(typeStr))
+var testLogsCfg = config.NewProcessorSettings(config.NewComponentID("test"))
 
 func TestNewLogsProcessor(t *testing.T) {
 	lp, err := NewLogsProcessor(&testLogsCfg, consumertest.NewNop(), newTestLProcessor(nil))
@@ -39,7 +38,7 @@ func TestNewLogsProcessor(t *testing.T) {
 
 	assert.True(t, lp.Capabilities().MutatesData)
 	assert.NoError(t, lp.Start(context.Background(), componenttest.NewNopHost()))
-	assert.NoError(t, lp.ConsumeLogs(context.Background(), pdata.NewLogs()))
+	assert.NoError(t, lp.ConsumeLogs(context.Background(), plog.NewLogs()))
 	assert.NoError(t, lp.Shutdown(context.Background()))
 }
 
@@ -61,24 +60,24 @@ func TestNewLogsProcessor_NilRequiredFields(t *testing.T) {
 	assert.Error(t, err)
 
 	_, err = NewLogsProcessor(&testLogsCfg, nil, newTestLProcessor(nil))
-	assert.Equal(t, componenterror.ErrNilNextConsumer, err)
+	assert.Equal(t, component.ErrNilNextConsumer, err)
 }
 
 func TestNewLogsProcessor_ProcessLogError(t *testing.T) {
 	want := errors.New("my_error")
 	lp, err := NewLogsProcessor(&testLogsCfg, consumertest.NewNop(), newTestLProcessor(want))
 	require.NoError(t, err)
-	assert.Equal(t, want, lp.ConsumeLogs(context.Background(), pdata.NewLogs()))
+	assert.Equal(t, want, lp.ConsumeLogs(context.Background(), plog.NewLogs()))
 }
 
 func TestNewLogsProcessor_ProcessLogsErrSkipProcessingData(t *testing.T) {
 	lp, err := NewLogsProcessor(&testLogsCfg, consumertest.NewNop(), newTestLProcessor(ErrSkipProcessingData))
 	require.NoError(t, err)
-	assert.Equal(t, nil, lp.ConsumeLogs(context.Background(), pdata.NewLogs()))
+	assert.Equal(t, nil, lp.ConsumeLogs(context.Background(), plog.NewLogs()))
 }
 
 func newTestLProcessor(retError error) ProcessLogsFunc {
-	return func(_ context.Context, ld pdata.Logs) (pdata.Logs, error) {
+	return func(_ context.Context, ld plog.Logs) (plog.Logs, error) {
 		return ld, retError
 	}
 }

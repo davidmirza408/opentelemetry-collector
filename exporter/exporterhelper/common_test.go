@@ -26,13 +26,13 @@ import (
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/component/componenttest"
 	"go.opentelemetry.io/collector/config"
-	"go.opentelemetry.io/collector/consumer/consumerhelper"
+	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/exporter/exporterhelper/internal"
-	"go.opentelemetry.io/collector/model/pdata"
+	"go.opentelemetry.io/collector/pdata/ptrace"
 )
 
 var (
-	defaultExporterCfg  = config.NewExporterSettings(config.NewComponentID(typeStr))
+	defaultExporterCfg  = config.NewExporterSettings(config.NewComponentID("test"))
 	exporterTag, _      = tag.NewKey("exporter")
 	defaultExporterTags = []tag.Tag{
 		{Key: exporterTag, Value: "test"},
@@ -53,7 +53,7 @@ func TestBaseExporterWithOptions(t *testing.T) {
 		fromOptions(
 			WithStart(func(ctx context.Context, host component.Host) error { return want }),
 			WithShutdown(func(ctx context.Context) error { return want }),
-			WithTimeout(DefaultTimeoutSettings())),
+			WithTimeout(NewDefaultTimeoutSettings())),
 		"",
 		nopRequestUnmarshaler(),
 	)
@@ -70,8 +70,8 @@ func checkStatus(t *testing.T, sd sdktrace.ReadOnlySpan, err error) {
 	}
 }
 
-func nopTracePusher() consumerhelper.ConsumeTracesFunc {
-	return func(ctx context.Context, ld pdata.Traces) error {
+func nopTracePusher() consumer.ConsumeTracesFunc {
+	return func(ctx context.Context, ld ptrace.Traces) error {
 		return nil
 	}
 }

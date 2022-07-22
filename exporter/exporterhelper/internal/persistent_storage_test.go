@@ -21,8 +21,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/ioutil"
-	"os"
 	"reflect"
 	"sync"
 	"testing"
@@ -34,8 +32,7 @@ import (
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/extension/experimental/storage"
-	"go.opentelemetry.io/collector/model/otlp"
-	"go.opentelemetry.io/collector/model/pdata"
+	"go.opentelemetry.io/collector/pdata/ptrace"
 )
 
 func createStorageExtension(_ string) storage.Extension {
@@ -56,32 +53,24 @@ func createTestPersistentStorageWithLoggingAndCapacity(client storage.Client, lo
 }
 
 func createTestPersistentStorage(client storage.Client) *persistentContiguousStorage {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	return createTestPersistentStorageWithLoggingAndCapacity(client, logger, 1000)
 }
 
-func createTemporaryDirectory() string {
-	directory, err := ioutil.TempDir("", "persistent-test")
-	if err != nil {
-		panic(err)
-	}
-	return directory
-}
-
 type fakeTracesRequest struct {
-	td                         pdata.Traces
+	td                         ptrace.Traces
 	processingFinishedCallback func()
 	PersistentRequest
 }
 
-func newFakeTracesRequest(td pdata.Traces) *fakeTracesRequest {
+func newFakeTracesRequest(td ptrace.Traces) *fakeTracesRequest {
 	return &fakeTracesRequest{
 		td: td,
 	}
 }
 
 func (fd *fakeTracesRequest) Marshal() ([]byte, error) {
-	return otlp.NewProtobufTracesMarshaler().MarshalTraces(fd.td)
+	return ptrace.NewProtoMarshaler().MarshalTraces(fd.td)
 }
 
 func (fd *fakeTracesRequest) OnProcessingFinished() {
@@ -96,7 +85,7 @@ func (fd *fakeTracesRequest) SetOnProcessingFinished(callback func()) {
 
 func newFakeTracesRequestUnmarshalerFunc() RequestUnmarshaler {
 	return func(bytes []byte) (PersistentRequest, error) {
-		traces, err := otlp.NewProtobufTracesUnmarshaler().UnmarshalTraces(bytes)
+		traces, err := ptrace.NewProtoUnmarshaler().UnmarshalTraces(bytes)
 		if err != nil {
 			return nil, err
 		}
@@ -105,13 +94,10 @@ func newFakeTracesRequestUnmarshalerFunc() RequestUnmarshaler {
 }
 
 func TestPersistentStorage_CorruptedData(t *testing.T) {
-	path := createTemporaryDirectory()
-	defer os.RemoveAll(path)
+	path := t.TempDir()
 
 	traces := newTraces(5, 10)
 	req := newFakeTracesRequest(traces)
-
-	ext := createStorageExtension(path)
 
 	cases := []struct {
 		name                               string
@@ -174,6 +160,7 @@ func TestPersistentStorage_CorruptedData(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			ext := createStorageExtension(path)
 			client := createTestClient(ext)
 			ps := createTestPersistentStorage(client)
 
@@ -186,7 +173,7 @@ func TestPersistentStorage_CorruptedData(t *testing.T) {
 			}
 			require.Eventually(t, func() bool {
 				return ps.size() == 2
-			}, 500*time.Millisecond, 10*time.Millisecond)
+			}, 5*time.Second, 10*time.Millisecond)
 			ps.stop()
 
 			// ... so now we can corrupt data (in several ways)
@@ -217,14 +204,13 @@ func TestPersistentStorage_CorruptedData(t *testing.T) {
 				newPs.mu.Lock()
 				defer newPs.mu.Unlock()
 				return newPs.size() == c.desiredQueueSize && len(newPs.currentlyDispatchedItems) == c.desiredNumberOfDispatchedItems
-			}, 500*time.Millisecond, 10*time.Millisecond)
+			}, 5*time.Second, 10*time.Millisecond)
 		})
 	}
 }
 
 func TestPersistentStorage_CurrentlyProcessedItems(t *testing.T) {
-	path := createTemporaryDirectory()
-	defer os.RemoveAll(path)
+	path := t.TempDir()
 
 	traces := newTraces(5, 10)
 	req := newFakeTracesRequest(traces)
@@ -260,7 +246,7 @@ func TestPersistentStorage_CurrentlyProcessedItems(t *testing.T) {
 	newPs := createTestPersistentStorage(client)
 	require.Eventually(t, func() bool {
 		return newPs.size() == 3
-	}, 500*time.Millisecond, 10*time.Millisecond)
+	}, 5*time.Second, 10*time.Millisecond)
 
 	requireCurrentlyDispatchedItemsEqual(t, newPs, []itemIndex{3})
 
@@ -274,7 +260,7 @@ func TestPersistentStorage_CurrentlyProcessedItems(t *testing.T) {
 	requireCurrentlyDispatchedItemsEqual(t, newPs, nil)
 	require.Eventually(t, func() bool {
 		return newPs.size() == 0
-	}, 500*time.Millisecond, 10*time.Millisecond)
+	}, 5*time.Second, 10*time.Millisecond)
 
 	// The writeIndex should be now set accordingly
 	require.Equal(t, 7, int(newPs.writeIndex))
@@ -288,8 +274,7 @@ func TestPersistentStorage_CurrentlyProcessedItems(t *testing.T) {
 }
 
 func TestPersistentStorage_RepeatPutCloseReadClose(t *testing.T) {
-	path := createTemporaryDirectory()
-	defer os.RemoveAll(path)
+	path := t.TempDir()
 
 	traces := newTraces(5, 10)
 	req := newFakeTracesRequest(traces)
@@ -316,7 +301,7 @@ func TestPersistentStorage_RepeatPutCloseReadClose(t *testing.T) {
 		// The first element should be already picked by loop
 		require.Eventually(t, func() bool {
 			return ps.size() == 1
-		}, 500*time.Millisecond, 10*time.Millisecond)
+		}, 5*time.Second, 10*time.Millisecond)
 
 		// Lets read both of the elements we put
 		readReq := getItemFromChannel(t, ps)
@@ -338,8 +323,7 @@ func TestPersistentStorage_RepeatPutCloseReadClose(t *testing.T) {
 }
 
 func TestPersistentStorage_EmptyRequest(t *testing.T) {
-	path := createTemporaryDirectory()
-	defer os.RemoveAll(path)
+	path := t.TempDir()
 
 	ext := createStorageExtension(path)
 	client := createTestClient(ext)
@@ -377,8 +361,7 @@ func BenchmarkPersistentStorage_TraceSpans(b *testing.B) {
 
 	for _, c := range cases {
 		b.Run(fmt.Sprintf("#traces: %d #spansPerTrace: %d", c.numTraces, c.numSpansPerTrace), func(bb *testing.B) {
-			path := createTemporaryDirectory()
-			defer os.RemoveAll(path)
+			path := bb.TempDir()
 			ext := createStorageExtension(path)
 			client := createTestClient(ext)
 			ps := createTestPersistentStorageWithLoggingAndCapacity(client, zap.NewNop(), 10000000)
@@ -441,7 +424,7 @@ func getItemFromChannel(t *testing.T, pcs *persistentContiguousStorage) Persiste
 	require.Eventually(t, func() bool {
 		readReq = <-pcs.get()
 		return true
-	}, 500*time.Millisecond, 10*time.Millisecond)
+	}, 5*time.Second, 10*time.Millisecond)
 	return readReq
 }
 
@@ -450,7 +433,7 @@ func requireCurrentlyDispatchedItemsEqual(t *testing.T, pcs *persistentContiguou
 		pcs.mu.Lock()
 		defer pcs.mu.Unlock()
 		return reflect.DeepEqual(pcs.currentlyDispatchedItems, compare)
-	}, 500*time.Millisecond, 10*time.Millisecond)
+	}, 5*time.Second, 10*time.Millisecond)
 }
 
 type mockStorageExtension struct{}

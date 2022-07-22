@@ -19,10 +19,8 @@ import (
 	"bufio"
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
-	"path"
-	"strconv"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -36,53 +34,242 @@ import (
 	"go.uber.org/zap/zapcore"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config/configmapprovider"
-	"go.opentelemetry.io/collector/internal/testcomponents"
+	"go.opentelemetry.io/collector/component/componenttest"
+	"go.opentelemetry.io/collector/confmap"
+	"go.opentelemetry.io/collector/extension/zpagesextension"
 	"go.opentelemetry.io/collector/internal/testutil"
+	"go.opentelemetry.io/collector/service/featuregate"
 )
 
-// TestCollector_StartAsGoRoutine must be the first unit test on the file,
-// to test for initialization without setting CLI flags.
-func TestCollector_StartAsGoRoutine(t *testing.T) {
-	// use a mock AppTelemetry struct to return an error on shutdown
-	preservedAppTelemetry := collectorTelemetry
-	collectorTelemetry = &colTelemetry{}
-	defer func() { collectorTelemetry = preservedAppTelemetry }()
+func TestStateString(t *testing.T) {
+	assert.Equal(t, "Starting", Starting.String())
+	assert.Equal(t, "Running", Running.String())
+	assert.Equal(t, "Closing", Closing.String())
+	assert.Equal(t, "Closed", Closed.String())
+	assert.Equal(t, "UNKNOWN", State(13).String())
+}
 
-	factories, err := testcomponents.DefaultFactories()
+func TestCollectorStartAsGoRoutine(t *testing.T) {
+	factories, err := componenttest.NopFactories()
+	require.NoError(t, err)
+
+	cfgProvider, err := NewConfigProvider(newDefaultConfigProviderSettings([]string{filepath.Join("testdata", "otelcol-nop.yaml")}))
 	require.NoError(t, err)
 
 	set := CollectorSettings{
-		BuildInfo:         component.NewDefaultBuildInfo(),
-		Factories:         factories,
-		ConfigMapProvider: configmapprovider.NewFile(path.Join("testdata", "otelcol-config.yaml")),
+		BuildInfo:      component.NewDefaultBuildInfo(),
+		Factories:      factories,
+		ConfigProvider: cfgProvider,
+		telemetry:      newColTelemetry(featuregate.NewRegistry()),
 	}
 	col, err := New(set)
 	require.NoError(t, err)
 
-	colDone := make(chan struct{})
+	wg := startCollector(context.Background(), t, col)
+
+	assert.Eventually(t, func() bool {
+		return Running == col.GetState()
+	}, 2*time.Second, 200*time.Millisecond)
+
+	col.Shutdown()
+	col.Shutdown()
+	wg.Wait()
+	assert.Equal(t, Closed, col.GetState())
+}
+
+func TestCollectorCancelContext(t *testing.T) {
+	factories, err := componenttest.NopFactories()
+	require.NoError(t, err)
+
+	cfgProvider, err := NewConfigProvider(newDefaultConfigProviderSettings([]string{filepath.Join("testdata", "otelcol-nop.yaml")}))
+	require.NoError(t, err)
+
+	set := CollectorSettings{
+		BuildInfo:      component.NewDefaultBuildInfo(),
+		Factories:      factories,
+		ConfigProvider: cfgProvider,
+		telemetry:      newColTelemetry(featuregate.NewRegistry()),
+	}
+	col, err := New(set)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	wg := startCollector(ctx, t, col)
+
+	assert.Eventually(t, func() bool {
+		return Running == col.GetState()
+	}, 2*time.Second, 200*time.Millisecond)
+
+	cancel()
+	wg.Wait()
+	assert.Equal(t, Closed, col.GetState())
+}
+
+func TestCollectorReportError(t *testing.T) {
+	factories, err := componenttest.NopFactories()
+	require.NoError(t, err)
+
+	cfgProvider, err := NewConfigProvider(newDefaultConfigProviderSettings([]string{filepath.Join("testdata", "otelcol-nop.yaml")}))
+	require.NoError(t, err)
+
+	col, err := New(CollectorSettings{
+		BuildInfo:      component.NewDefaultBuildInfo(),
+		Factories:      factories,
+		ConfigProvider: cfgProvider,
+		telemetry:      newColTelemetry(featuregate.NewRegistry()),
+	})
+	require.NoError(t, err)
+
+	wg := startCollector(context.Background(), t, col)
+
+	assert.Eventually(t, func() bool {
+		return Running == col.GetState()
+	}, 2*time.Second, 200*time.Millisecond)
+
+	col.service.host.ReportFatalError(errors.New("err2"))
+
+	wg.Wait()
+	assert.Equal(t, Closed, col.GetState())
+}
+
+func TestCollectorFailedShutdown(t *testing.T) {
+	t.Skip("This test was using telemetry shutdown failure, switch to use a component that errors on shutdown.")
+	factories, err := componenttest.NopFactories()
+	require.NoError(t, err)
+
+	cfgProvider, err := NewConfigProvider(newDefaultConfigProviderSettings([]string{filepath.Join("testdata", "otelcol-nop.yaml")}))
+	require.NoError(t, err)
+
+	col, err := New(CollectorSettings{
+		BuildInfo:      component.NewDefaultBuildInfo(),
+		Factories:      factories,
+		ConfigProvider: cfgProvider,
+		telemetry:      newColTelemetry(featuregate.NewRegistry()),
+	})
+	require.NoError(t, err)
+
+	wg := sync.WaitGroup{}
+	wg.Add(1)
 	go func() {
-		defer close(colDone)
-		colErr := col.Run(context.Background())
-		if colErr != nil {
-			err = colErr
-		}
+		defer wg.Done()
+		assert.EqualError(t, col.Run(context.Background()), "failed to shutdown collector telemetry: err1")
 	}()
 
 	assert.Eventually(t, func() bool {
 		return Running == col.GetState()
-	}, time.Second*2, time.Millisecond*200)
+	}, 2*time.Second, 200*time.Millisecond)
 
 	col.Shutdown()
-	col.Shutdown()
-	<-colDone
-	assert.Eventually(t, func() bool {
-		return Closed == col.GetState()
-	}, time.Second*2, time.Millisecond*200)
+
+	wg.Wait()
+	assert.Equal(t, Closed, col.GetState())
 }
 
-func TestCollector_Start(t *testing.T) {
-	factories, err := testcomponents.DefaultFactories()
+// mapConverter applies extraMap of config settings. Useful for overriding the config
+// for testing purposes. Keys must use "::" delimiter between levels.
+type mapConverter struct {
+	extraMap map[string]interface{}
+}
+
+func (m mapConverter) Convert(ctx context.Context, conf *confmap.Conf) error {
+	return conf.Merge(confmap.NewFromStringMap(m.extraMap))
+}
+
+type labelState int
+
+const (
+	labelNotPresent labelState = iota
+	labelSpecificValue
+	labelAnyValue
+)
+
+type labelValue struct {
+	label string
+	state labelState
+}
+
+type ownMetricsTestCase struct {
+	name                string
+	userDefinedResource map[string]*string
+	expectedLabels      map[string]labelValue
+}
+
+var testResourceAttrValue = "resource_attr_test_value"
+var testInstanceID = "test_instance_id"
+var testServiceVersion = "2022-05-20"
+
+func ownMetricsTestCases(version string) []ownMetricsTestCase {
+	return []ownMetricsTestCase{{
+		name:                "no resource",
+		userDefinedResource: nil,
+		// All labels added to all collector metrics by default are listed below.
+		// These labels are hard coded here in order to avoid inadvertent changes:
+		// at this point changing labels should be treated as a breaking changing
+		// and requires a good justification. The reason is that changes to metric
+		// names or labels can break alerting, dashboards, etc that are used to
+		// monitor the Collector in production deployments.
+		expectedLabels: map[string]labelValue{
+			"service_instance_id": {state: labelAnyValue},
+			"service_version":     {label: version, state: labelSpecificValue},
+		},
+	},
+		{
+			name: "resource with custom attr",
+			userDefinedResource: map[string]*string{
+				"custom_resource_attr": &testResourceAttrValue,
+			},
+			expectedLabels: map[string]labelValue{
+				"service_instance_id":  {state: labelAnyValue},
+				"service_version":      {label: version, state: labelSpecificValue},
+				"custom_resource_attr": {label: "resource_attr_test_value", state: labelSpecificValue},
+			},
+		},
+		{
+			name: "override service.instance.id",
+			userDefinedResource: map[string]*string{
+				"service.instance.id": &testInstanceID,
+			},
+			expectedLabels: map[string]labelValue{
+				"service_instance_id": {label: "test_instance_id", state: labelSpecificValue},
+				"service_version":     {label: version, state: labelSpecificValue},
+			},
+		},
+		{
+			name: "suppress service.instance.id",
+			userDefinedResource: map[string]*string{
+				"service.instance.id": nil, // nil value in config is used to suppress attributes.
+			},
+			expectedLabels: map[string]labelValue{
+				"service_instance_id": {state: labelNotPresent},
+				"service_version":     {label: version, state: labelSpecificValue},
+			},
+		},
+		{
+			name: "override service.version",
+			userDefinedResource: map[string]*string{
+				"service.version": &testServiceVersion,
+			},
+			expectedLabels: map[string]labelValue{
+				"service_instance_id": {state: labelAnyValue},
+				"service_version":     {label: "2022-05-20", state: labelSpecificValue},
+			},
+		},
+		{
+			name: "suppress service.version",
+			userDefinedResource: map[string]*string{
+				"service.version": nil, // nil value in config is used to suppress attributes.
+			},
+			expectedLabels: map[string]labelValue{
+				"service_instance_id": {state: labelAnyValue},
+				"service_version":     {state: labelNotPresent},
+			},
+		}}
+}
+
+func testCollectorStartHelper(t *testing.T, telemetry *telemetryInitializer, tc ownMetricsTestCase) {
+	factories, err := componenttest.NopFactories()
+	zpagesExt := zpagesextension.NewFactory()
+	factories.Extensions[zpagesExt.Type()] = zpagesExt
 	require.NoError(t, err)
 	var once sync.Once
 	loggingHookCalled := false
@@ -93,99 +280,165 @@ func TestCollector_Start(t *testing.T) {
 		return nil
 	}
 
+	metricsAddr := testutil.GetAvailableLocalAddress(t)
+	// Prepare config properties to be merged with the main config.
+	extraCfgAsProps := map[string]interface{}{
+		// Setup the zpages extension.
+		"extensions::zpages":  nil,
+		"service::extensions": "nop, zpages",
+		// Set the metrics address to expose own metrics on.
+		"service::telemetry::metrics::address": metricsAddr,
+	}
+	// Also include resource attributes under the service::telemetry::resource key.
+	for k, v := range tc.userDefinedResource {
+		extraCfgAsProps["service::telemetry::resource::"+k] = v
+	}
+
+	cfgSet := newDefaultConfigProviderSettings([]string{filepath.Join("testdata", "otelcol-nop.yaml")})
+	cfgSet.MapConverters = append([]confmap.Converter{
+		mapConverter{extraCfgAsProps}},
+		cfgSet.MapConverters...,
+	)
+	cfgProvider, err := NewConfigProvider(cfgSet)
+	require.NoError(t, err)
+
 	col, err := New(CollectorSettings{
-		BuildInfo:         component.NewDefaultBuildInfo(),
-		Factories:         factories,
-		ConfigMapProvider: configmapprovider.NewFile(path.Join("testdata", "otelcol-config.yaml")),
-		LoggingOptions:    []zap.Option{zap.Hooks(hook)},
+		BuildInfo:      component.BuildInfo{Version: "test version"},
+		Factories:      factories,
+		ConfigProvider: cfgProvider,
+		LoggingOptions: []zap.Option{zap.Hooks(hook)},
+		telemetry:      telemetry,
 	})
 	require.NoError(t, err)
 
-	metricsPort := testutil.GetAvailablePort(t)
-	require.NoError(t, flags().Parse([]string{
-		"--metrics-addr=localhost:" + strconv.FormatUint(uint64(metricsPort), 10),
-	}))
-
-	colDone := make(chan struct{})
-	go func() {
-		defer close(colDone)
-		assert.NoError(t, col.Run(context.Background()))
-	}()
+	wg := startCollector(context.Background(), t, col)
 
 	assert.Eventually(t, func() bool {
 		return Running == col.GetState()
-	}, time.Second*2, time.Millisecond*200)
-	assert.Equal(t, col.logger, col.GetLogger())
+	}, 2*time.Second, 200*time.Millisecond)
 	assert.True(t, loggingHookCalled)
 
-	// All labels added to all collector metrics by default are listed below.
-	// These labels are hard coded here in order to avoid inadvertent changes:
-	// at this point changing labels should be treated as a breaking changing
-	// and requires a good justification. The reason is that changes to metric
-	// names or labels can break alerting, dashboards, etc that are used to
-	// monitor the Collector in production deployments.
-	mandatoryLabels := []string{
-		"service_instance_id",
-	}
-	assertMetrics(t, metricsPort, mandatoryLabels)
+	assertMetrics(t, metricsAddr, tc.expectedLabels)
 
 	assertZPages(t)
-
 	col.signalsChannel <- syscall.SIGTERM
-	<-colDone
-	assert.Eventually(t, func() bool {
-		return Closed == col.GetState()
-	}, time.Second*2, time.Millisecond*200)
+
+	wg.Wait()
+	assert.Equal(t, Closed, col.GetState())
 }
 
-type mockColTelemetry struct{}
-
-func (tel *mockColTelemetry) init(*Collector) error {
-	return nil
+func TestCollectorStartWithOpenCensusMetrics(t *testing.T) {
+	for _, tc := range ownMetricsTestCases("test version") {
+		t.Run(tc.name, func(t *testing.T) {
+			testCollectorStartHelper(t, newColTelemetry(featuregate.NewRegistry()), tc)
+		})
+	}
 }
 
-func (tel *mockColTelemetry) shutdown() error {
-	return errors.New("err1")
+func TestCollectorStartWithOpenTelemetryMetrics(t *testing.T) {
+	for _, tc := range ownMetricsTestCases("test version") {
+		t.Run(tc.name, func(t *testing.T) {
+			colTel := newColTelemetry(featuregate.NewRegistry())
+			colTel.registry.Apply(map[string]bool{
+				useOtelForInternalMetricsfeatureGateID: true,
+			})
+			testCollectorStartHelper(t, colTel, tc)
+		})
+	}
 }
 
-func TestCollector_ReportError(t *testing.T) {
-	// use a mock AppTelemetry struct to return an error on shutdown
-	preservedAppTelemetry := collectorTelemetry
-	collectorTelemetry = &mockColTelemetry{}
-	defer func() { collectorTelemetry = preservedAppTelemetry }()
+func TestCollectorRun(t *testing.T) {
+	tests := []struct {
+		file string
+	}{
+		{file: "otelcol-nometrics.yaml"},
+		{file: "otelcol-noaddress.yaml"},
+	}
 
-	factories, err := testcomponents.DefaultFactories()
+	for _, tt := range tests {
+		t.Run(tt.file, func(t *testing.T) {
+			factories, err := componenttest.NopFactories()
+			require.NoError(t, err)
+
+			cfgProvider, err := NewConfigProvider(newDefaultConfigProviderSettings([]string{filepath.Join("testdata", tt.file)}))
+			require.NoError(t, err)
+
+			set := CollectorSettings{
+				BuildInfo:      component.NewDefaultBuildInfo(),
+				Factories:      factories,
+				ConfigProvider: cfgProvider,
+				telemetry:      newColTelemetry(featuregate.NewRegistry()),
+			}
+			col, err := New(set)
+			require.NoError(t, err)
+
+			wg := startCollector(context.Background(), t, col)
+
+			col.Shutdown()
+			wg.Wait()
+			assert.Equal(t, Closed, col.GetState())
+		})
+	}
+}
+
+func TestCollectorShutdownBeforeRun(t *testing.T) {
+	factories, err := componenttest.NopFactories()
 	require.NoError(t, err)
 
-	col, err := New(CollectorSettings{
-		BuildInfo:         component.NewDefaultBuildInfo(),
-		Factories:         factories,
-		ConfigMapProvider: configmapprovider.NewFile(path.Join("testdata", "otelcol-config.yaml")),
-	})
+	cfgProvider, err := NewConfigProvider(newDefaultConfigProviderSettings([]string{filepath.Join("testdata", "otelcol-nop.yaml")}))
 	require.NoError(t, err)
 
-	colDone := make(chan struct{})
-	go func() {
-		defer close(colDone)
-		assert.EqualError(t, col.Run(context.Background()), "failed to shutdown collector telemetry: err1")
-	}()
+	set := CollectorSettings{
+		BuildInfo:      component.NewDefaultBuildInfo(),
+		Factories:      factories,
+		ConfigProvider: cfgProvider,
+		telemetry:      newColTelemetry(featuregate.NewRegistry()),
+	}
+	col, err := New(set)
+	require.NoError(t, err)
 
-	assert.Eventually(t, func() bool {
-		return Running == col.GetState()
-	}, time.Second*2, time.Millisecond*200)
-	col.service.ReportFatalError(errors.New("err2"))
-	<-colDone
-	assert.Eventually(t, func() bool {
-		return Closed == col.GetState()
-	}, time.Second*2, time.Millisecond*200)
+	// Calling shutdown before collector is running should cause it to return quickly
+	require.NotPanics(t, func() { col.Shutdown() })
+
+	wg := startCollector(context.Background(), t, col)
+
+	col.Shutdown()
+	wg.Wait()
+	assert.Equal(t, Closed, col.GetState())
 }
 
-func assertMetrics(t *testing.T, metricsPort uint16, mandatoryLabels []string) {
+func TestCollectorClosedStateOnStartUpError(t *testing.T) {
+	factories, err := componenttest.NopFactories()
+	require.NoError(t, err)
+
+	cfgProvider, err := NewConfigProvider(newDefaultConfigProviderSettings([]string{filepath.Join("testdata", "otelcol-invalid.yaml")}))
+	require.NoError(t, err)
+
+	// Load a bad config causing startup to fail
+	set := CollectorSettings{
+		BuildInfo:      component.NewDefaultBuildInfo(),
+		Factories:      factories,
+		ConfigProvider: cfgProvider,
+		telemetry:      newColTelemetry(featuregate.NewRegistry()),
+	}
+	col, err := New(set)
+	require.NoError(t, err)
+
+	// Expect run to error
+	require.Error(t, col.Run(context.Background()))
+
+	// Expect state to be closed
+	assert.Equal(t, Closed, col.GetState())
+}
+
+func assertMetrics(t *testing.T, metricsAddr string, expectedLabels map[string]labelValue) {
 	client := &http.Client{}
-	resp, err := client.Get(fmt.Sprintf("http://localhost:%d/metrics", metricsPort))
+	resp, err := client.Get("http://" + metricsAddr + "/metrics")
 	require.NoError(t, err)
 
-	defer resp.Body.Close()
+	t.Cleanup(func() {
+		assert.NoError(t, resp.Body.Close())
+	})
 	reader := bufio.NewReader(resp.Body)
 
 	var parser expfmt.TextParser
@@ -203,14 +456,21 @@ func assertMetrics(t *testing.T, metricsPort uint16, mandatoryLabels []string) {
 			metricName[:len(prefix)+1]+"...")
 
 		for _, metric := range metricFamily.Metric {
-			var labelNames []string
+			labelMap := map[string]string{}
 			for _, labelPair := range metric.Label {
-				labelNames = append(labelNames, *labelPair.Name)
+				labelMap[*labelPair.Name] = *labelPair.Value
 			}
 
-			for _, mandatoryLabel := range mandatoryLabels {
-				// require is used here so test fails with a single message.
-				require.Contains(t, labelNames, mandatoryLabel, "mandatory label %q not present", mandatoryLabel)
+			for k, v := range expectedLabels {
+				switch v.state {
+				case labelNotPresent:
+					_, present := labelMap[k]
+					assert.Falsef(t, present, "label %q must not be present", k)
+				case labelSpecificValue:
+					require.Equalf(t, v.label, labelMap[k], "mandatory label %q value mismatch", k)
+				case labelAnyValue:
+					assert.NotEmptyf(t, labelMap[k], "mandatory label %q not present", k)
+				}
 			}
 		}
 	}
@@ -241,4 +501,14 @@ func assertZPages(t *testing.T) {
 	for _, path := range paths {
 		testZPagePathFn(t, path)
 	}
+}
+
+func startCollector(ctx context.Context, t *testing.T, col *Collector) *sync.WaitGroup {
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		require.NoError(t, col.Run(ctx))
+	}()
+	return wg
 }

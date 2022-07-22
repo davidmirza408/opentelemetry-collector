@@ -91,6 +91,7 @@ package client // import "go.opentelemetry.io/collector/client"
 import (
 	"context"
 	"net"
+	"strings"
 )
 
 type ctxKey struct{}
@@ -106,6 +107,15 @@ type Info struct {
 	// configauth.ServerAuthenticator implementations tied to the receiver for
 	// this connection.
 	Auth AuthData
+
+	// Metadata is the request metadata from the client connecting to this connector.
+	// Experimental: *NOTE* this structure is subject to change or removal in the future.
+	Metadata Metadata
+}
+
+// Metadata is an immutable map, meant to contain request metadata.
+type Metadata struct {
+	data map[string][]string
 }
 
 // AuthData represents the authentication data as seen by authenticators tied to
@@ -122,6 +132,8 @@ type AuthData interface {
 	GetAttributeNames() []string
 }
 
+const MetadataHostName = "Host"
+
 // NewContext takes an existing context and derives a new context with the
 // client.Info value stored on it.
 func NewContext(ctx context.Context, c Info) context.Context {
@@ -136,4 +148,36 @@ func FromContext(ctx context.Context) Info {
 		c = Info{}
 	}
 	return c
+}
+
+// NewMetadata creates a new Metadata object to use in Info. md is used as-is.
+func NewMetadata(md map[string][]string) Metadata {
+	return Metadata{
+		data: md,
+	}
+}
+
+// Get gets the value of the key from metadata, returning a copy.
+func (m Metadata) Get(key string) []string {
+	vals := m.data[key]
+	if len(vals) == 0 {
+		// we didn't find the key, but perhaps it just has different cases?
+		for k, v := range m.data {
+			if strings.EqualFold(key, k) {
+				vals = v
+				// we optimize for the next lookup
+				m.data[key] = v
+			}
+		}
+
+		// if it's still not found, it's really not here
+		if len(vals) == 0 {
+			return nil
+		}
+	}
+
+	ret := make([]string, len(vals))
+	copy(ret, vals)
+
+	return ret
 }

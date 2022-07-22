@@ -31,11 +31,10 @@ import (
 	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/consumer/consumererror"
-	"go.opentelemetry.io/collector/consumer/consumerhelper"
 	"go.opentelemetry.io/collector/internal/obsreportconfig/obsmetrics"
 	"go.opentelemetry.io/collector/internal/testdata"
-	"go.opentelemetry.io/collector/model/pdata"
 	"go.opentelemetry.io/collector/obsreport/obsreporttest"
+	"go.opentelemetry.io/collector/pdata/plog"
 )
 
 const (
@@ -49,12 +48,12 @@ var (
 )
 
 func TestLogsRequest(t *testing.T) {
-	lr := newLogsRequest(context.Background(), testdata.GenerateLogsOneLogRecord(), nil)
+	lr := newLogsRequest(context.Background(), testdata.GenerateLogs(1), nil)
 
-	logErr := consumererror.NewLogs(errors.New("some error"), pdata.NewLogs())
+	logErr := consumererror.NewLogs(errors.New("some error"), plog.NewLogs())
 	assert.EqualValues(
 		t,
-		newLogsRequest(context.Background(), pdata.NewLogs(), nil),
+		newLogsRequest(context.Background(), plog.NewLogs(), nil),
 		lr.onError(logErr),
 	)
 }
@@ -78,7 +77,7 @@ func TestLogsExporter_NilPushLogsData(t *testing.T) {
 }
 
 func TestLogsExporter_Default(t *testing.T) {
-	ld := pdata.NewLogs()
+	ld := plog.NewLogs()
 	le, err := NewLogsExporter(&fakeLogsExporterConfig, componenttest.NewNopExporterCreateSettings(), newPushLogsData(nil))
 	assert.NotNil(t, le)
 	assert.NoError(t, err)
@@ -99,7 +98,7 @@ func TestLogsExporter_WithCapabilities(t *testing.T) {
 }
 
 func TestLogsExporter_Default_ReturnError(t *testing.T) {
-	ld := pdata.NewLogs()
+	ld := plog.NewLogs()
 	want := errors.New("my_error")
 	le, err := NewLogsExporter(&fakeLogsExporterConfig, componenttest.NewNopExporterCreateSettings(), newPushLogsData(want))
 	require.NoError(t, err)
@@ -129,8 +128,8 @@ func TestLogsExporter_WithRecordEnqueueFailedMetrics(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, tt.Shutdown(context.Background())) })
 
-	rCfg := DefaultRetrySettings()
-	qCfg := DefaultQueueSettings()
+	rCfg := NewDefaultRetrySettings()
+	qCfg := NewDefaultQueueSettings()
 	qCfg.NumConsumers = 1
 	qCfg.QueueSize = 2
 	wantErr := errors.New("some-error")
@@ -138,7 +137,7 @@ func TestLogsExporter_WithRecordEnqueueFailedMetrics(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, te)
 
-	md := testdata.GenerateLogsTwoLogRecordsSameResourceOneDifferent()
+	md := testdata.GenerateLogs(3)
 	const numBatches = 7
 	for i := 0; i < numBatches; i++ {
 		// errors are checked in the checkExporterEnqueueFailedLogsStats function below.
@@ -199,8 +198,8 @@ func TestLogsExporter_WithShutdown_ReturnError(t *testing.T) {
 	assert.Equal(t, le.Shutdown(context.Background()), want)
 }
 
-func newPushLogsData(retError error) consumerhelper.ConsumeLogsFunc {
-	return func(ctx context.Context, td pdata.Logs) error {
+func newPushLogsData(retError error) consumer.ConsumeLogsFunc {
+	return func(ctx context.Context, td plog.Logs) error {
 		return retError
 	}
 }
@@ -210,7 +209,7 @@ func checkRecordedMetricsForLogsExporter(t *testing.T, le component.LogsExporter
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, tt.Shutdown(context.Background())) })
 
-	ld := testdata.GenerateLogsTwoLogRecordsSameResource()
+	ld := testdata.GenerateLogs(2)
 	const numBatches = 7
 	for i := 0; i < numBatches; i++ {
 		require.Equal(t, wantError, le.ConsumeLogs(context.Background(), ld))
@@ -225,7 +224,7 @@ func checkRecordedMetricsForLogsExporter(t *testing.T, le component.LogsExporter
 }
 
 func generateLogsTraffic(t *testing.T, tracer trace.Tracer, le component.LogsExporter, numRequests int, wantError error) {
-	ld := testdata.GenerateLogsOneLogRecord()
+	ld := testdata.GenerateLogs(1)
 	ctx, span := tracer.Start(context.Background(), fakeLogsParentSpanName)
 	defer span.End()
 	for i := 0; i < numRequests; i++ {

@@ -15,7 +15,8 @@
 package configtelemetry // import "go.opentelemetry.io/collector/config/configtelemetry"
 
 import (
-	"flag"
+	"encoding"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -34,39 +35,13 @@ const (
 	levelBasicStr    = "basic"
 	levelNormalStr   = "normal"
 	levelDetailedStr = "detailed"
-
-	metricsLevelCfg = "metrics-level"
-	metricsAddrCfg  = "metrics-addr"
 )
-
-const UseOpenTelemetryForInternalMetrics = false
-
-var (
-	metricsLevelPtr = new(Level)
-	metricsAddrPtr  = new(string)
-)
-
-// Flags is a helper function to add telemetry config flags to the service that exposes
-// the application flags.
-func Flags(flags *flag.FlagSet) {
-	flags.Var(
-		metricsLevelPtr,
-		metricsLevelCfg,
-		"Deprecated. Define the metrics configuration as part of the configuration file, under the 'service' section.")
-
-	// At least until we can use a generic, i.e.: OpenCensus, metrics exporter
-	// we default to Prometheus at port 8888, if not otherwise specified.
-	metricsAddrPtr = flags.String(
-		metricsAddrCfg,
-		GetMetricsAddrDefault(),
-		"Deprecated. Define the metrics configuration as part of the configuration file, under the 'service' section.")
-}
 
 // Level is the level of internal telemetry (metrics, logs, traces about the component itself)
 // that every component should generate.
 type Level int32
 
-var _ flag.Value = (*Level)(nil)
+var _ encoding.TextUnmarshaler = (*Level)(nil)
 
 func (l Level) String() string {
 	switch l {
@@ -82,59 +57,26 @@ func (l Level) String() string {
 	return "unknown"
 }
 
-// Set sets the telemetry level.
-func (l *Level) Set(s string) error {
-	lvl, err := parseLevel(s)
-	if err != nil {
-		return err
-	}
-	*l = lvl
-	return nil
-}
-
-// UnmarshalText unmarshals text to a Level.
+// UnmarshalText unmarshalls text to a Level.
 func (l *Level) UnmarshalText(text []byte) error {
 	if l == nil {
-		return fmt.Errorf("cannot unmarshal to a nil *Level")
+		return errors.New("cannot unmarshal to a nil *Level")
 	}
-	var err error
-	*l, err = parseLevel(string(text))
-	return err
-}
 
-// parseLevel returns the Level represented by the string. The parsing is case-insensitive
-// and it returns error if the string value is unknown.
-func parseLevel(str string) (Level, error) {
-	str = strings.ToLower(str)
-
+	str := strings.ToLower(string(text))
 	switch str {
 	case levelNoneStr:
-		return LevelNone, nil
+		*l = LevelNone
+		return nil
 	case levelBasicStr:
-		return LevelBasic, nil
+		*l = LevelBasic
+		return nil
 	case levelNormalStr:
-		return LevelNormal, nil
+		*l = LevelNormal
+		return nil
 	case levelDetailedStr:
-		return LevelDetailed, nil
+		*l = LevelDetailed
+		return nil
 	}
-	return LevelNone, fmt.Errorf("unknown metrics level %q", str)
-}
-
-// GetMetricsAddrDefault returns the default metrics bind address and port depending on
-// the current build type.
-// Deprecated: This function will be removed in the future.
-func GetMetricsAddrDefault() string {
-	return ":8888"
-}
-
-// Deprecated: This function will be removed in the future.
-func GetMetricsAddr() string {
-	return *metricsAddrPtr
-}
-
-// GetMetricsLevelFlagValue returns the value of the "--metrics-level" flag.
-// IMPORTANT: This must be used only in the core collector code for the moment.
-// Deprecated: This function will be removed in the future.
-func GetMetricsLevelFlagValue() Level {
-	return *metricsLevelPtr
+	return fmt.Errorf("unknown metrics level %q", str)
 }

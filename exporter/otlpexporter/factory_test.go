@@ -16,7 +16,7 @@ package otlpexporter
 
 import (
 	"context"
-	"path"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -25,6 +25,7 @@ import (
 
 	"go.opentelemetry.io/collector/component/componenttest"
 	"go.opentelemetry.io/collector/config"
+	"go.opentelemetry.io/collector/config/configcompression"
 	"go.opentelemetry.io/collector/config/configgrpc"
 	"go.opentelemetry.io/collector/config/configtest"
 	"go.opentelemetry.io/collector/config/configtls"
@@ -39,9 +40,10 @@ func TestCreateDefaultConfig(t *testing.T) {
 	assert.NoError(t, configtest.CheckConfigStruct(cfg))
 	ocfg, ok := factory.CreateDefaultConfig().(*Config)
 	assert.True(t, ok)
-	assert.Equal(t, ocfg.RetrySettings, exporterhelper.DefaultRetrySettings())
-	assert.Equal(t, ocfg.QueueSettings, exporterhelper.DefaultQueueSettings())
-	assert.Equal(t, ocfg.TimeoutSettings, exporterhelper.DefaultTimeoutSettings())
+	assert.Equal(t, ocfg.RetrySettings, exporterhelper.NewDefaultRetrySettings())
+	assert.Equal(t, ocfg.QueueSettings, exporterhelper.NewDefaultQueueSettings())
+	assert.Equal(t, ocfg.TimeoutSettings, exporterhelper.NewDefaultTimeoutSettings())
+	assert.Equal(t, ocfg.Compression, configcompression.Gzip)
 }
 
 func TestCreateMetricsExporter(t *testing.T) {
@@ -100,12 +102,22 @@ func TestCreateTracesExporter(t *testing.T) {
 			},
 		},
 		{
+			name: "NoneCompression",
+			config: Config{
+				ExporterSettings: config.NewExporterSettings(config.NewComponentID(typeStr)),
+				GRPCClientSettings: configgrpc.GRPCClientSettings{
+					Endpoint:    endpoint,
+					Compression: "none",
+				},
+			},
+		},
+		{
 			name: "GzipCompression",
 			config: Config{
 				ExporterSettings: config.NewExporterSettings(config.NewComponentID(typeStr)),
 				GRPCClientSettings: configgrpc.GRPCClientSettings{
 					Endpoint:    endpoint,
-					Compression: configgrpc.CompressionGzip,
+					Compression: configcompression.Gzip,
 				},
 			},
 		},
@@ -114,7 +126,7 @@ func TestCreateTracesExporter(t *testing.T) {
 			config: Config{
 				GRPCClientSettings: configgrpc.GRPCClientSettings{
 					Endpoint:    endpoint,
-					Compression: configgrpc.CompressionSnappy,
+					Compression: configcompression.Snappy,
 				},
 			},
 		},
@@ -123,7 +135,7 @@ func TestCreateTracesExporter(t *testing.T) {
 			config: Config{
 				GRPCClientSettings: configgrpc.GRPCClientSettings{
 					Endpoint:    endpoint,
-					Compression: configgrpc.CompressionZstd,
+					Compression: configcompression.Zstd,
 				},
 			},
 		},
@@ -150,17 +162,6 @@ func TestCreateTracesExporter(t *testing.T) {
 			},
 		},
 		{
-			name: "CompressionError",
-			config: Config{
-				ExporterSettings: config.NewExporterSettings(config.NewComponentID(typeStr)),
-				GRPCClientSettings: configgrpc.GRPCClientSettings{
-					Endpoint:    endpoint,
-					Compression: "unknown compression",
-				},
-			},
-			mustFailOnStart: true,
-		},
-		{
 			name: "CaCert",
 			config: Config{
 				ExporterSettings: config.NewExporterSettings(config.NewComponentID(typeStr)),
@@ -168,7 +169,7 @@ func TestCreateTracesExporter(t *testing.T) {
 					Endpoint: endpoint,
 					TLSSetting: configtls.TLSClientSetting{
 						TLSSetting: configtls.TLSSetting{
-							CAFile: path.Join("testdata", "test_cert.pem"),
+							CAFile: filepath.Join("testdata", "test_cert.pem"),
 						},
 					},
 				},

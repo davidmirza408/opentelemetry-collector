@@ -15,37 +15,36 @@
 package service
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"go.opentelemetry.io/collector/internal/testcomponents"
+	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/component/componenttest"
 )
 
-func TestNewCommand(t *testing.T) {
-	set := CollectorSettings{}
-	cmd := NewCommand(set)
-	err := cmd.Execute()
-	require.Error(t, err)
-	assert.Equal(t, set.BuildInfo.Version, cmd.Version)
+func TestNewCommandVersion(t *testing.T) {
+	cmd := NewCommand(CollectorSettings{BuildInfo: component.BuildInfo{Version: "test_version"}})
+	assert.Equal(t, "test_version", cmd.Version)
 }
 
-func TestNewCommandMapProviderIsNil(t *testing.T) {
-	settings := CollectorSettings{}
-	settings.ConfigMapProvider = nil
-	cmd := NewCommand(settings)
-	err := cmd.Execute()
-	require.Error(t, err)
-}
-
-func TestNewCommandInvalidFactories(t *testing.T) {
-	factories, err := testcomponents.ExampleComponents()
+func TestNewCommandNoConfigURI(t *testing.T) {
+	factories, err := componenttest.NopFactories()
 	require.NoError(t, err)
-	f := &badConfigExtensionFactory{}
-	factories.Extensions[f.Type()] = f
-	settings := CollectorSettings{Factories: factories}
-	cmd := NewCommand(settings)
-	err = cmd.Execute()
-	require.Error(t, err)
+
+	cmd := NewCommand(CollectorSettings{Factories: factories})
+	require.Error(t, cmd.Execute())
+}
+
+func TestNewCommandInvalidComponent(t *testing.T) {
+	factories, err := componenttest.NopFactories()
+	require.NoError(t, err)
+
+	cfgProvider, err := NewConfigProvider(newDefaultConfigProviderSettings([]string{filepath.Join("testdata", "otelcol-invalid.yaml")}))
+	require.NoError(t, err)
+
+	cmd := NewCommand(CollectorSettings{Factories: factories, ConfigProvider: cfgProvider})
+	require.Error(t, cmd.Execute())
 }

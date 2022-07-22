@@ -1,6 +1,10 @@
 # Memory Limiter Processor
 
-Supported pipeline types: metrics, traces, logs
+| Status                   |                       |
+| ------------------------ | --------------------- |
+| Stability                | [beta]                |
+| Supported pipeline types | traces, metrics, logs |
+| Distributions            | [core], [contrib]     |
 
 The memory limiter processor is used to prevent out of memory situations on
 the collector. Given that the amount and type of data the collector processes is
@@ -73,9 +77,6 @@ This option is used to calculate `spike_limit_mib` from the total available memo
 For instance setting of 25% with the total memory of 1GiB will result in the spike limit of 250MiB.
 This option is intended to be used only with `limit_percentage`.
 
-The `ballast_size_mib` configuration has been deprecated and replaced by `ballast_extension`.
-- <del>`ballast_size_mib` (default = 0): Must match the value of `ballast_size_mib` in `ballastextension` config</del>
-
 Examples:
 
 ```yaml
@@ -96,3 +97,7 @@ processors:
 
 Refer to [config.yaml](./testdata/config.yaml) for detailed
 examples on using the processor.
+
+[beta]: https://github.com/open-telemetry/opentelemetry-collector#beta
+[contrib]: https://github.com/open-telemetry/opentelemetry-collector-releases/tree/main/distributions/otelcol-contrib
+[core]: https://github.com/open-telemetry/opentelemetry-collector-releases/tree/main/distributions/otelcol

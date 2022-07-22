@@ -17,18 +17,17 @@ package service // import "go.opentelemetry.io/collector/service"
 import (
 	"context"
 	"fmt"
-	"sync"
-
-	"go.uber.org/multierr"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
-	"go.opentelemetry.io/collector/config/configmapprovider"
-	"go.opentelemetry.io/collector/config/configunmarshaler"
-	"go.opentelemetry.io/collector/config/experimental/configsource"
+	"go.opentelemetry.io/collector/confmap"
+	"go.opentelemetry.io/collector/confmap/converter/expandconverter"
+	"go.opentelemetry.io/collector/confmap/provider/envprovider"
+	"go.opentelemetry.io/collector/confmap/provider/fileprovider"
+	"go.opentelemetry.io/collector/confmap/provider/yamlprovider"
+	"go.opentelemetry.io/collector/service/internal/configunmarshaler"
 )
 
-// configProvider represents the service configuration provider object.
+// ConfigProvider provides the service configuration.
 //
 // The typical usage is the following:
 //
@@ -38,43 +37,81 @@ import (
 //		cfgProvider.Watch() // wait for an event.
 //		// repeat Get/Watch cycle until it is time to shut down the Collector process.
 //		cfgProvider.Shutdown()
+type ConfigProvider interface {
+	// Get returns the service configuration, or error otherwise.
+	//
+	// Should never be called concurrently with itself, Watch or Shutdown.
+	Get(ctx context.Context, factories component.Factories) (*Config, error)
+
+	// Watch blocks until any configuration change was detected or an unrecoverable error
+	// happened during monitoring the configuration changes.
+	//
+	// Error is nil if the configuration is changed and needs to be re-fetched. Any non-nil
+	// error indicates that there was a problem with watching the config changes.
+	//
+	// Should never be called concurrently with itself or Get.
+	Watch() <-chan error
+
+	// Shutdown signals that the provider is no longer in use and the that should close
+	// and release any resources that it may have created.
+	//
+	// This function must terminate the Watch channel.
+	//
+	// Should never be called concurrently with itself or Get.
+	Shutdown(ctx context.Context) error
+}
+
 type configProvider struct {
-	configMapProvider configmapprovider.Provider
-	configUnmarshaler configunmarshaler.ConfigUnmarshaler
-
-	sync.Mutex
-	ret     configmapprovider.Retrieved
-	watcher chan error
+	mapResolver *confmap.Resolver
 }
 
-func newConfigProvider(configMapProvider configmapprovider.Provider, configUnmarshaler configunmarshaler.ConfigUnmarshaler) *configProvider {
+// ConfigProviderSettings are the settings to configure the behavior of the ConfigProvider.
+// TODO: embed confmap.ResolverSettings into this to avoid duplicates.
+type ConfigProviderSettings struct {
+	// Locations from where the confmap.Conf is retrieved, and merged in the given order.
+	// It is required to have at least one location.
+	Locations []string
+
+	// MapProviders is a map of pairs <scheme, confmap.Provider>.
+	// It is required to have at least one confmap.Provider.
+	MapProviders map[string]confmap.Provider
+
+	// MapConverters is a slice of confmap.Converter.
+	MapConverters []confmap.Converter
+}
+
+func newDefaultConfigProviderSettings(locations []string) ConfigProviderSettings {
+	return ConfigProviderSettings{
+		Locations:     locations,
+		MapProviders:  makeMapProvidersMap(fileprovider.New(), envprovider.New(), yamlprovider.New()),
+		MapConverters: []confmap.Converter{expandconverter.New()},
+	}
+}
+
+// NewConfigProvider returns a new ConfigProvider that provides the service configuration:
+// * Initially it resolves the "configuration map":
+//	 * Retrieve the confmap.Conf by merging all retrieved maps from the given `locations` in order.
+// 	 * Then applies all the confmap.Converter in the given order.
+// * Then unmarshalls the confmap.Conf into the service Config.
+func NewConfigProvider(set ConfigProviderSettings) (ConfigProvider, error) {
+	mr, err := confmap.NewResolver(confmap.ResolverSettings{URIs: set.Locations, Providers: set.MapProviders, Converters: set.MapConverters})
+	if err != nil {
+		return nil, err
+	}
+
 	return &configProvider{
-		configMapProvider: configMapProvider,
-		configUnmarshaler: configUnmarshaler,
-		watcher:           make(chan error, 1),
-	}
+		mapResolver: mr,
+	}, nil
 }
 
-func (cm *configProvider) get(ctx context.Context, factories component.Factories) (*config.Config, error) {
-	// First check if already an active watching, close that if any.
-	if err := cm.closeIfNeeded(ctx); err != nil {
-		return nil, fmt.Errorf("cannot close previous watch: %w", err)
+func (cm *configProvider) Get(ctx context.Context, factories component.Factories) (*Config, error) {
+	retMap, err := cm.mapResolver.Resolve(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("cannot resolve the configuration: %w", err)
 	}
 
-	var err error
-	cm.ret, err = cm.configMapProvider.Retrieve(ctx, cm.onChange)
-	if err != nil {
-		// Nothing to close, no valid retrieved value.
-		cm.ret = nil
-		return nil, fmt.Errorf("cannot retrieve the configuration: %w", err)
-	}
-
-	var cfg *config.Config
-	m, err := cm.ret.Get(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("cannot get the configuration: %w", err)
-	}
-	if cfg, err = cm.configUnmarshaler.Unmarshal(m, factories); err != nil {
+	var cfg *Config
+	if cfg, err = configunmarshaler.New().Unmarshal(retMap, factories); err != nil {
 		return nil, fmt.Errorf("cannot unmarshal the configuration: %w", err)
 	}
 
@@ -85,25 +122,18 @@ func (cm *configProvider) get(ctx context.Context, factories component.Factories
 	return cfg, nil
 }
 
-func (cm *configProvider) watch() <-chan error {
-	return cm.watcher
+func (cm *configProvider) Watch() <-chan error {
+	return cm.mapResolver.Watch()
 }
 
-func (cm *configProvider) onChange(event *configmapprovider.ChangeEvent) {
-	// TODO: Remove check for configsource.ErrSessionClosed when providers updated to not call onChange when closed.
-	if event.Error != configsource.ErrSessionClosed {
-		cm.watcher <- event.Error
+func (cm *configProvider) Shutdown(ctx context.Context) error {
+	return cm.mapResolver.Shutdown(ctx)
+}
+
+func makeMapProvidersMap(providers ...confmap.Provider) map[string]confmap.Provider {
+	ret := make(map[string]confmap.Provider, len(providers))
+	for _, provider := range providers {
+		ret[provider.Scheme()] = provider
 	}
-}
-
-func (cm *configProvider) closeIfNeeded(ctx context.Context) error {
-	if cm.ret != nil {
-		return cm.ret.Close(ctx)
-	}
-	return nil
-}
-
-func (cm *configProvider) shutdown(ctx context.Context) error {
-	close(cm.watcher)
-	return multierr.Combine(cm.closeIfNeeded(ctx), cm.configMapProvider.Shutdown(ctx))
+	return ret
 }

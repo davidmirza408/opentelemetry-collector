@@ -17,6 +17,7 @@ package configgrpc // import "go.opentelemetry.io/collector/config/configgrpc"
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -29,34 +30,21 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/balancer/roundrobin"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/encoding/gzip"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 
 	"go.opentelemetry.io/collector/client"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/config/configauth"
+	"go.opentelemetry.io/collector/config/configcompression"
 	"go.opentelemetry.io/collector/config/confignet"
 	"go.opentelemetry.io/collector/config/configtls"
-	"go.opentelemetry.io/collector/internal/middleware"
 )
 
-// Compression gRPC keys for supported compression types within collector.
-const (
-	CompressionUnsupported = ""
-	CompressionGzip        = "gzip"
-	CompressionSnappy      = "snappy"
-	CompressionZstd        = "zstd"
-)
-
-var (
-	// Map of opentelemetry compression types to grpc registered compression types.
-	gRPCCompressionKeyMap = map[string]string{
-		CompressionGzip:   gzip.Name,
-		CompressionSnappy: snappy.Name,
-		CompressionZstd:   zstd.Name,
-	}
-)
+var errMetadataNotFound = errors.New("no request metadata found")
 
 // Allowed balancer names to be set in grpclb_policy to discover the servers.
 var allowedBalancerNames = []string{roundrobin.Name, grpc.PickFirstBalancerName}
@@ -65,9 +53,9 @@ var allowedBalancerNames = []string{roundrobin.Name, grpc.PickFirstBalancerName}
 // Refer to the original data-structure for the meaning of each parameter:
 // https://godoc.org/google.golang.org/grpc/keepalive#ClientParameters
 type KeepaliveClientConfig struct {
-	Time                time.Duration `mapstructure:"time,omitempty"`
-	Timeout             time.Duration `mapstructure:"timeout,omitempty"`
-	PermitWithoutStream bool          `mapstructure:"permit_without_stream,omitempty"`
+	Time                time.Duration `mapstructure:"time"`
+	Timeout             time.Duration `mapstructure:"timeout"`
+	PermitWithoutStream bool          `mapstructure:"permit_without_stream"`
 }
 
 // GRPCClientSettings defines common settings for a gRPC client configuration.
@@ -78,10 +66,10 @@ type GRPCClientSettings struct {
 	Endpoint string `mapstructure:"endpoint"`
 
 	// The compression key for supported compression types within collector.
-	Compression string `mapstructure:"compression"`
+	Compression configcompression.CompressionType `mapstructure:"compression"`
 
 	// TLSSetting struct exposes TLS client configuration.
-	TLSSetting configtls.TLSClientSetting `mapstructure:"tls,omitempty"`
+	TLSSetting configtls.TLSClientSetting `mapstructure:"tls"`
 
 	// The keepalive parameters for gRPC client. See grpc.WithKeepaliveParams.
 	// (https://godoc.org/google.golang.org/grpc#WithKeepaliveParams).
@@ -107,32 +95,32 @@ type GRPCClientSettings struct {
 	BalancerName string `mapstructure:"balancer_name"`
 
 	// Auth configuration for outgoing RPCs.
-	Auth *configauth.Authentication `mapstructure:"auth,omitempty"`
+	Auth *configauth.Authentication `mapstructure:"auth"`
 }
 
 // KeepaliveServerConfig is the configuration for keepalive.
 type KeepaliveServerConfig struct {
-	ServerParameters  *KeepaliveServerParameters  `mapstructure:"server_parameters,omitempty"`
-	EnforcementPolicy *KeepaliveEnforcementPolicy `mapstructure:"enforcement_policy,omitempty"`
+	ServerParameters  *KeepaliveServerParameters  `mapstructure:"server_parameters"`
+	EnforcementPolicy *KeepaliveEnforcementPolicy `mapstructure:"enforcement_policy"`
 }
 
 // KeepaliveServerParameters allow configuration of the keepalive.ServerParameters.
 // The same default values as keepalive.ServerParameters are applicable and get applied by the server.
 // See https://godoc.org/google.golang.org/grpc/keepalive#ServerParameters for details.
 type KeepaliveServerParameters struct {
-	MaxConnectionIdle     time.Duration `mapstructure:"max_connection_idle,omitempty"`
-	MaxConnectionAge      time.Duration `mapstructure:"max_connection_age,omitempty"`
-	MaxConnectionAgeGrace time.Duration `mapstructure:"max_connection_age_grace,omitempty"`
-	Time                  time.Duration `mapstructure:"time,omitempty"`
-	Timeout               time.Duration `mapstructure:"timeout,omitempty"`
+	MaxConnectionIdle     time.Duration `mapstructure:"max_connection_idle"`
+	MaxConnectionAge      time.Duration `mapstructure:"max_connection_age"`
+	MaxConnectionAgeGrace time.Duration `mapstructure:"max_connection_age_grace"`
+	Time                  time.Duration `mapstructure:"time"`
+	Timeout               time.Duration `mapstructure:"timeout"`
 }
 
 // KeepaliveEnforcementPolicy allow configuration of the keepalive.EnforcementPolicy.
 // The same default values as keepalive.EnforcementPolicy are applicable and get applied by the server.
 // See https://godoc.org/google.golang.org/grpc/keepalive#EnforcementPolicy for details.
 type KeepaliveEnforcementPolicy struct {
-	MinTime             time.Duration `mapstructure:"min_time,omitempty"`
-	PermitWithoutStream bool          `mapstructure:"permit_without_stream,omitempty"`
+	MinTime             time.Duration `mapstructure:"min_time"`
+	PermitWithoutStream bool          `mapstructure:"permit_without_stream"`
 }
 
 // GRPCServerSettings defines common settings for a gRPC server configuration.
@@ -142,7 +130,7 @@ type GRPCServerSettings struct {
 
 	// Configures the protocol to use TLS.
 	// The default value is nil, which will cause the protocol to not use TLS.
-	TLSSetting *configtls.TLSServerSetting `mapstructure:"tls,omitempty"`
+	TLSSetting *configtls.TLSServerSetting `mapstructure:"tls"`
 
 	// MaxRecvMsgSizeMiB sets the maximum size (in MiB) of messages accepted by the server.
 	MaxRecvMsgSizeMiB uint64 `mapstructure:"max_recv_msg_size_mib"`
@@ -160,10 +148,14 @@ type GRPCServerSettings struct {
 	WriteBufferSize int `mapstructure:"write_buffer_size"`
 
 	// Keepalive anchor for all the settings related to keepalive.
-	Keepalive *KeepaliveServerConfig `mapstructure:"keepalive,omitempty"`
+	Keepalive *KeepaliveServerConfig `mapstructure:"keepalive"`
 
 	// Auth for this receiver
-	Auth *configauth.Authentication `mapstructure:"auth,omitempty"`
+	Auth *configauth.Authentication `mapstructure:"auth"`
+
+	// Include propagates the incoming connection's metadata to downstream consumers.
+	// Experimental: *NOTE* this option is subject to change or removal in the future.
+	IncludeMetadata bool `mapstructure:"include_metadata"`
 }
 
 // SanitizedEndpoint strips the prefix of either http:// or https:// from configgrpc.GRPCClientSettings.Endpoint.
@@ -189,25 +181,25 @@ func (gcs *GRPCClientSettings) isSchemeHTTPS() bool {
 // ToDialOptions maps configgrpc.GRPCClientSettings to a slice of dial options for gRPC.
 func (gcs *GRPCClientSettings) ToDialOptions(host component.Host, settings component.TelemetrySettings) ([]grpc.DialOption, error) {
 	var opts []grpc.DialOption
-	if gcs.Compression != "" {
-		if compressionKey := GetGRPCCompressionKey(gcs.Compression); compressionKey != CompressionUnsupported {
-			opts = append(opts, grpc.WithDefaultCallOptions(grpc.UseCompressor(compressionKey)))
-		} else {
-			return nil, fmt.Errorf("unsupported compression type %q", gcs.Compression)
+	if configcompression.IsCompressed(gcs.Compression) {
+		cp, err := getGRPCCompressionName(gcs.Compression)
+		if err != nil {
+			return nil, err
 		}
+		opts = append(opts, grpc.WithDefaultCallOptions(grpc.UseCompressor(cp)))
 	}
 
 	tlsCfg, err := gcs.TLSSetting.LoadTLSConfig()
 	if err != nil {
 		return nil, err
 	}
-	tlsDialOption := grpc.WithInsecure()
+	cred := insecure.NewCredentials()
 	if tlsCfg != nil {
-		tlsDialOption = grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg))
+		cred = credentials.NewTLS(tlsCfg)
 	} else if gcs.isSchemeHTTPS() {
-		tlsDialOption = grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{}))
+		cred = credentials.NewTLS(&tls.Config{})
 	}
-	opts = append(opts, tlsDialOption)
+	opts = append(opts, grpc.WithTransportCredentials(cred))
 
 	if gcs.ReadBufferSize > 0 {
 		opts = append(opts, grpc.WithReadBufferSize(gcs.ReadBufferSize))
@@ -228,7 +220,7 @@ func (gcs *GRPCClientSettings) ToDialOptions(host component.Host, settings compo
 
 	if gcs.Auth != nil {
 		if host.GetExtensions() == nil {
-			return nil, fmt.Errorf("no extensions configuration available")
+			return nil, errors.New("no extensions configuration available")
 		}
 
 		grpcAuthenticator, cerr := gcs.Auth.GetClientAuthenticator(host.GetExtensions())
@@ -251,9 +243,16 @@ func (gcs *GRPCClientSettings) ToDialOptions(host component.Host, settings compo
 		opts = append(opts, grpc.WithDefaultServiceConfig(fmt.Sprintf(`{"loadBalancingPolicy":"%s"}`, gcs.BalancerName)))
 	}
 
+	otelOpts := []otelgrpc.Option{
+		otelgrpc.WithTracerProvider(settings.TracerProvider),
+		// TODO: https://github.com/open-telemetry/opentelemetry-collector/issues/4030
+		// otelgrpc.WithMeterProvider(settings.MeterProvider),
+		otelgrpc.WithPropagators(otel.GetTextMapPropagator()),
+	}
+
 	// Enable OpenTelemetry observability plugin.
-	opts = append(opts, grpc.WithUnaryInterceptor(otelgrpc.UnaryClientInterceptor(otelgrpc.WithTracerProvider(settings.TracerProvider))))
-	opts = append(opts, grpc.WithStreamInterceptor(otelgrpc.StreamClientInterceptor(otelgrpc.WithTracerProvider(settings.TracerProvider))))
+	opts = append(opts, grpc.WithUnaryInterceptor(otelgrpc.UnaryClientInterceptor(otelOpts...)))
+	opts = append(opts, grpc.WithStreamInterceptor(otelgrpc.StreamClientInterceptor(otelOpts...)))
 
 	return opts, nil
 }
@@ -337,61 +336,106 @@ func (gss *GRPCServerSettings) ToServerOption(host component.Host, settings comp
 			return nil, err
 		}
 
-		uInterceptors = append(uInterceptors, authenticator.GRPCUnaryServerInterceptor)
-		sInterceptors = append(sInterceptors, authenticator.GRPCStreamServerInterceptor)
+		uInterceptors = append(uInterceptors, func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
+			return authUnaryServerInterceptor(ctx, req, info, handler, authenticator.Authenticate)
+		})
+		sInterceptors = append(sInterceptors, func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+			return authStreamServerInterceptor(srv, ss, info, handler, authenticator.Authenticate)
+		})
+	}
+
+	otelOpts := []otelgrpc.Option{
+		otelgrpc.WithTracerProvider(settings.TracerProvider),
+		// TODO: https://github.com/open-telemetry/opentelemetry-collector/issues/4030
+		// otelgrpc.WithMeterProvider(settings.MeterProvider),
+		otelgrpc.WithPropagators(otel.GetTextMapPropagator()),
 	}
 
 	// Enable OpenTelemetry observability plugin.
 	// TODO: Pass construct settings to have access to Tracer.
-	uInterceptors = append(uInterceptors, otelgrpc.UnaryServerInterceptor(
-		otelgrpc.WithTracerProvider(settings.TracerProvider),
-		// TODO: https://github.com/open-telemetry/opentelemetry-collector/issues/4030
-		// otelgrpc.WithMeterProvider(settings.MeterProvider),
-		otelgrpc.WithPropagators(otel.GetTextMapPropagator()),
-	))
-	sInterceptors = append(sInterceptors, otelgrpc.StreamServerInterceptor(
-		otelgrpc.WithTracerProvider(settings.TracerProvider),
-		// TODO: https://github.com/open-telemetry/opentelemetry-collector/issues/4030
-		// otelgrpc.WithMeterProvider(settings.MeterProvider),
-		otelgrpc.WithPropagators(otel.GetTextMapPropagator()),
-	))
+	uInterceptors = append(uInterceptors, otelgrpc.UnaryServerInterceptor(otelOpts...))
+	sInterceptors = append(sInterceptors, otelgrpc.StreamServerInterceptor(otelOpts...))
 
-	uInterceptors = append(uInterceptors, enhanceWithClientInformation)
-	sInterceptors = append(sInterceptors, enhanceStreamWithClientInformation)
+	uInterceptors = append(uInterceptors, enhanceWithClientInformation(gss.IncludeMetadata))
+	sInterceptors = append(sInterceptors, enhanceStreamWithClientInformation(gss.IncludeMetadata))
 
 	opts = append(opts, grpc.ChainUnaryInterceptor(uInterceptors...), grpc.ChainStreamInterceptor(sInterceptors...))
 
 	return opts, nil
 }
 
-// GetGRPCCompressionKey returns the grpc registered compression key if the
-// passed in compression key is supported, and CompressionUnsupported otherwise.
-func GetGRPCCompressionKey(compressionType string) string {
-	compressionKey := strings.ToLower(compressionType)
-	if encodingKey, ok := gRPCCompressionKeyMap[compressionKey]; ok {
-		return encodingKey
+// getGRPCCompressionName returns compression name registered in grpc.
+func getGRPCCompressionName(compressionType configcompression.CompressionType) (string, error) {
+	switch compressionType {
+	case configcompression.Gzip:
+		return gzip.Name, nil
+	case configcompression.Snappy:
+		return snappy.Name, nil
+	case configcompression.Zstd:
+		return zstd.Name, nil
+	default:
+		return "", fmt.Errorf("unsupported compression type %q", compressionType)
 	}
-	return CompressionUnsupported
 }
 
 // enhanceWithClientInformation intercepts the incoming RPC, replacing the incoming context with one that includes
 // a client.Info, potentially with the peer's address.
-func enhanceWithClientInformation(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-	return handler(contextWithClient(ctx), req)
+func enhanceWithClientInformation(includeMetadata bool) func(ctx context.Context, req interface{}, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+	return func(ctx context.Context, req interface{}, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		return handler(contextWithClient(ctx, includeMetadata), req)
+	}
 }
 
-func enhanceStreamWithClientInformation(srv interface{}, ss grpc.ServerStream, _ *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-	wrapped := middleware.WrapServerStream(ss)
-	wrapped.WrappedContext = contextWithClient(ss.Context())
-	return handler(srv, wrapped)
+func enhanceStreamWithClientInformation(includeMetadata bool) func(srv interface{}, ss grpc.ServerStream, _ *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	return func(srv interface{}, ss grpc.ServerStream, _ *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		return handler(srv, wrapServerStream(contextWithClient(ss.Context(), includeMetadata), ss))
+	}
 }
 
 // contextWithClient attempts to add the peer address to the client.Info from the context. When no
 // client.Info exists in the context, one is created.
-func contextWithClient(ctx context.Context) context.Context {
+func contextWithClient(ctx context.Context, includeMetadata bool) context.Context {
 	cl := client.FromContext(ctx)
 	if p, ok := peer.FromContext(ctx); ok {
 		cl.Addr = p.Addr
 	}
+	if includeMetadata {
+		if md, ok := metadata.FromIncomingContext(ctx); ok {
+			copiedMD := md.Copy()
+			if len(md[client.MetadataHostName]) == 0 && len(md[":authority"]) > 0 {
+				copiedMD[client.MetadataHostName] = md[":authority"]
+			}
+			cl.Metadata = client.NewMetadata(copiedMD)
+		}
+	}
 	return client.NewContext(ctx, cl)
+}
+
+func authUnaryServerInterceptor(ctx context.Context, req interface{}, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler, authenticate configauth.AuthenticateFunc) (interface{}, error) {
+	headers, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return nil, errMetadataNotFound
+	}
+
+	ctx, err := authenticate(ctx, headers)
+	if err != nil {
+		return nil, err
+	}
+
+	return handler(ctx, req)
+}
+
+func authStreamServerInterceptor(srv interface{}, stream grpc.ServerStream, _ *grpc.StreamServerInfo, handler grpc.StreamHandler, authenticate configauth.AuthenticateFunc) error {
+	ctx := stream.Context()
+	headers, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return errMetadataNotFound
+	}
+
+	ctx, err := authenticate(ctx, headers)
+	if err != nil {
+		return err
+	}
+
+	return handler(srv, wrapServerStream(ctx, stream))
 }

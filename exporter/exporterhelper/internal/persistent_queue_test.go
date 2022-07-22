@@ -20,22 +20,22 @@ package internal
 import (
 	"context"
 	"fmt"
-	"os"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"go.uber.org/atomic"
 	"go.uber.org/zap"
 
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/extension/experimental/storage"
-	"go.opentelemetry.io/collector/model/pdata"
+	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/pdata/ptrace"
 )
 
 func createTestQueue(extension storage.Extension, capacity int) *persistentQueue {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 
 	client, err := extension.GetClient(context.Background(), component.KindReceiver, config.ComponentID{}, "")
 	if err != nil {
@@ -47,8 +47,7 @@ func createTestQueue(extension storage.Extension, capacity int) *persistentQueue
 }
 
 func TestPersistentQueue_Capacity(t *testing.T) {
-	path := createTemporaryDirectory()
-	defer os.RemoveAll(path)
+	path := t.TempDir()
 
 	for i := 0; i < 100; i++ {
 		ext := createStorageExtension(path)
@@ -73,7 +72,7 @@ func TestPersistentQueue_Capacity(t *testing.T) {
 			if i == 0 {
 				require.Eventually(t, func() bool {
 					return wq.Size() == 0
-				}, 1000*time.Millisecond, 10*time.Millisecond)
+				}, 5*time.Second, 10*time.Millisecond)
 			}
 		}
 		require.Equal(t, 5, wq.Size())
@@ -81,8 +80,7 @@ func TestPersistentQueue_Capacity(t *testing.T) {
 }
 
 func TestPersistentQueue_Close(t *testing.T) {
-	path := createTemporaryDirectory()
-	defer os.RemoveAll(path)
+	path := t.TempDir()
 
 	ext := createStorageExtension(path)
 	t.Cleanup(func() { require.NoError(t, ext.Shutdown(context.Background())) })
@@ -100,12 +98,12 @@ func TestPersistentQueue_Close(t *testing.T) {
 	require.Eventually(t, func() bool {
 		wq.Stop()
 		return true
-	}, 500*time.Millisecond, 10*time.Millisecond)
+	}, 5*time.Second, 10*time.Millisecond)
 	// The additional stop should not panic
 	require.Eventually(t, func() bool {
 		wq.Stop()
 		return true
-	}, 500*time.Millisecond, 10*time.Millisecond)
+	}, 5*time.Second, 10*time.Millisecond)
 }
 
 func TestPersistentQueue_ConsumersProducers(t *testing.T) {
@@ -137,7 +135,7 @@ func TestPersistentQueue_ConsumersProducers(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(fmt.Sprintf("#messages: %d #consumers: %d", c.numMessagesProduced, c.numConsumers), func(t *testing.T) {
-			path := createTemporaryDirectory()
+			path := t.TempDir()
 
 			traces := newTraces(1, 10)
 			req := newFakeTracesRequest(traces)
@@ -145,14 +143,13 @@ func TestPersistentQueue_ConsumersProducers(t *testing.T) {
 			ext := createStorageExtension(path)
 			tq := createTestQueue(ext, 5000)
 
-			defer os.RemoveAll(path)
 			defer tq.Stop()
 			t.Cleanup(func() { require.NoError(t, ext.Shutdown(context.Background())) })
 
-			numMessagesConsumed := int32(0)
+			numMessagesConsumed := atomic.NewInt32(0)
 			tq.StartConsumers(c.numConsumers, func(item interface{}) {
 				if item != nil {
-					atomic.AddInt32(&numMessagesConsumed, 1)
+					numMessagesConsumed.Inc()
 				}
 			})
 
@@ -161,26 +158,26 @@ func TestPersistentQueue_ConsumersProducers(t *testing.T) {
 			}
 
 			require.Eventually(t, func() bool {
-				return c.numMessagesProduced == int(atomic.LoadInt32(&numMessagesConsumed))
-			}, 500*time.Millisecond, 10*time.Millisecond)
+				return c.numMessagesProduced == int(numMessagesConsumed.Load())
+			}, 5*time.Second, 10*time.Millisecond)
 		})
 	}
 }
 
-func newTraces(numTraces int, numSpans int) pdata.Traces {
-	traces := pdata.NewTraces()
+func newTraces(numTraces int, numSpans int) ptrace.Traces {
+	traces := ptrace.NewTraces()
 	batch := traces.ResourceSpans().AppendEmpty()
 	batch.Resource().Attributes().InsertString("resource-attr", "some-resource")
 	batch.Resource().Attributes().InsertInt("num-traces", int64(numTraces))
 	batch.Resource().Attributes().InsertInt("num-spans", int64(numSpans))
 
 	for i := 0; i < numTraces; i++ {
-		traceID := pdata.NewTraceID([16]byte{1, 2, 3, byte(i)})
-		ils := batch.InstrumentationLibrarySpans().AppendEmpty()
+		traceID := pcommon.NewTraceID([16]byte{1, 2, 3, byte(i)})
+		ils := batch.ScopeSpans().AppendEmpty()
 		for j := 0; j < numSpans; j++ {
 			span := ils.Spans().AppendEmpty()
 			span.SetTraceID(traceID)
-			span.SetSpanID(pdata.NewSpanID([8]byte{1, 2, 3, byte(j)}))
+			span.SetSpanID(pcommon.NewSpanID([8]byte{1, 2, 3, byte(j)}))
 			span.SetName("should-not-be-changed")
 			span.Attributes().InsertInt("int-attribute", int64(j))
 			span.Attributes().InsertString("str-attribute-1", "foobar")

@@ -31,11 +31,10 @@ import (
 	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/consumer/consumererror"
-	"go.opentelemetry.io/collector/consumer/consumerhelper"
 	"go.opentelemetry.io/collector/internal/obsreportconfig/obsmetrics"
 	"go.opentelemetry.io/collector/internal/testdata"
-	"go.opentelemetry.io/collector/model/pdata"
 	"go.opentelemetry.io/collector/obsreport/obsreporttest"
+	"go.opentelemetry.io/collector/pdata/ptrace"
 )
 
 const (
@@ -48,10 +47,10 @@ var (
 )
 
 func TestTracesRequest(t *testing.T) {
-	mr := newTracesRequest(context.Background(), testdata.GenerateTracesOneSpan(), nil)
+	mr := newTracesRequest(context.Background(), testdata.GenerateTraces(1), nil)
 
-	traceErr := consumererror.NewTraces(errors.New("some error"), pdata.NewTraces())
-	assert.EqualValues(t, newTracesRequest(context.Background(), pdata.NewTraces(), nil), mr.onError(traceErr))
+	traceErr := consumererror.NewTraces(errors.New("some error"), ptrace.NewTraces())
+	assert.EqualValues(t, newTracesRequest(context.Background(), ptrace.NewTraces(), nil), mr.onError(traceErr))
 }
 
 func TestTracesExporter_InvalidName(t *testing.T) {
@@ -73,7 +72,7 @@ func TestTracesExporter_NilPushTraceData(t *testing.T) {
 }
 
 func TestTracesExporter_Default(t *testing.T) {
-	td := pdata.NewTraces()
+	td := ptrace.NewTraces()
 	te, err := NewTracesExporter(&fakeTracesExporterConfig, componenttest.NewNopExporterCreateSettings(), newTraceDataPusher(nil))
 	assert.NotNil(t, te)
 	assert.NoError(t, err)
@@ -94,7 +93,7 @@ func TestTracesExporter_WithCapabilities(t *testing.T) {
 }
 
 func TestTracesExporter_Default_ReturnError(t *testing.T) {
-	td := pdata.NewTraces()
+	td := ptrace.NewTraces()
 	want := errors.New("my_error")
 	te, err := NewTracesExporter(&fakeTracesExporterConfig, componenttest.NewNopExporterCreateSettings(), newTraceDataPusher(want))
 	require.NoError(t, err)
@@ -126,8 +125,8 @@ func TestTracesExporter_WithRecordEnqueueFailedMetrics(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, tt.Shutdown(context.Background())) })
 
-	rCfg := DefaultRetrySettings()
-	qCfg := DefaultQueueSettings()
+	rCfg := NewDefaultRetrySettings()
+	qCfg := NewDefaultQueueSettings()
 	qCfg.NumConsumers = 1
 	qCfg.QueueSize = 2
 	wantErr := errors.New("some-error")
@@ -135,7 +134,7 @@ func TestTracesExporter_WithRecordEnqueueFailedMetrics(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, te)
 
-	td := testdata.GenerateTracesTwoSpansSameResource()
+	td := testdata.GenerateTraces(2)
 	const numBatches = 7
 	for i := 0; i < numBatches; i++ {
 		// errors are checked in the checkExporterEnqueueFailedTracesStats function below.
@@ -200,8 +199,8 @@ func TestTracesExporter_WithShutdown_ReturnError(t *testing.T) {
 	assert.Equal(t, te.Shutdown(context.Background()), want)
 }
 
-func newTraceDataPusher(retError error) consumerhelper.ConsumeTracesFunc {
-	return func(ctx context.Context, td pdata.Traces) error {
+func newTraceDataPusher(retError error) consumer.ConsumeTracesFunc {
+	return func(ctx context.Context, td ptrace.Traces) error {
 		return retError
 	}
 }
@@ -211,7 +210,7 @@ func checkRecordedMetricsForTracesExporter(t *testing.T, te component.TracesExpo
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, tt.Shutdown(context.Background())) })
 
-	td := testdata.GenerateTracesTwoSpansSameResource()
+	td := testdata.GenerateTraces(2)
 	const numBatches = 7
 	for i := 0; i < numBatches; i++ {
 		require.Equal(t, wantError, te.ConsumeTraces(context.Background(), td))
@@ -226,8 +225,8 @@ func checkRecordedMetricsForTracesExporter(t *testing.T, te component.TracesExpo
 }
 
 func generateTraceTraffic(t *testing.T, tracer trace.Tracer, te component.TracesExporter, numRequests int, wantError error) {
-	td := pdata.NewTraces()
-	td.ResourceSpans().AppendEmpty().InstrumentationLibrarySpans().AppendEmpty().Spans().AppendEmpty()
+	td := ptrace.NewTraces()
+	td.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans().AppendEmpty()
 	ctx, span := tracer.Start(context.Background(), fakeTraceParentSpanName)
 	defer span.End()
 	for i := 0; i < numRequests; i++ {
